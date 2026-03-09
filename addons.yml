@@ -1,0 +1,99 @@
+# Known BentoBox addons and their GitHub repos.
+# Used by fetch_jars.py to download the latest release JAR for each.
+
+bentobox:
+  repo: BentoBoxWorld/BentoBox
+
+addons:
+  - name: AcidIsland
+    repo: BentoBoxWorld/AcidIsland
+
+  - name: AOneBlock
+    repo: BentoBoxWorld/AOneBlock
+
+  - name: Bank
+    repo: BentoBoxWorld/Bank
+
+  - name: Biomes
+    repo: BentoBoxWorld/Biomes
+
+  - name: Border
+    repo: BentoBoxWorld/Border
+
+  - name: Boxed
+    repo: BentoBoxWorld/Boxed
+
+  - name: BSkyBlock
+    repo: BentoBoxWorld/BSkyBlock
+
+  - name: CauldronWitchery
+    repo: BentoBoxWorld/CauldronWitchery
+
+  - name: CaveBlock
+    repo: BentoBoxWorld/CaveBlock
+
+  - name: Challenges
+    repo: BentoBoxWorld/Challenges
+
+  - name: Chat
+    repo: BentoBoxWorld/Chat
+
+  - name: CheckMeOut
+    repo: BentoBoxWorld/CheckMeOut
+
+  - name: ControlPanel
+    repo: BentoBoxWorld/ControlPanel
+
+  - name: DimensionalTrees
+    repo: BentoBoxWorld/DimensionalTrees
+
+  - name: ExtraMobs
+    repo: BentoBoxWorld/ExtraMobs
+
+  - name: FarmersDance
+    repo: BentoBoxWorld/FarmersDance
+
+  - name: Greenhouses
+    repo: BentoBoxWorld/Greenhouses
+
+  - name: InvSwitcher
+    repo: BentoBoxWorld/InvSwitcher
+
+  - name: IslandFly
+    repo: BentoBoxWorld/IslandFly
+
+  - name: Level
+    repo: BentoBoxWorld/Level
+
+  - name: Likes
+    repo: BentoBoxWorld/Likes
+
+  - name: Limits
+    repo: BentoBoxWorld/Limits
+
+  - name: MagicCobblestoneGenerator
+    repo: BentoBoxWorld/MagicCobblestoneGenerator
+
+  - name: Parkour
+    repo: BentoBoxWorld/Parkour
+
+  - name: Poseidon
+    repo: BentoBoxWorld/Poseidon
+
+  - name: SkyGrid
+    repo: BentoBoxWorld/SkyGrid
+
+  - name: StrangerRealms
+    repo: BentoBoxWorld/StrangerRealms
+
+  - name: TwerkingForTrees
+    repo: BentoBoxWorld/TwerkingForTrees
+
+  - name: Visit
+    repo: BentoBoxWorld/Visit
+
+  - name: VoidPortals
+    repo: BentoBoxWorld/VoidPortals
+
+  - name: Warps
+    repo: BentoBoxWorld/Warps

@@ -1,0 +1,96 @@
+name: BentoBox Integration Tests
+
+on:
+  # Run when BentoBox itself publishes a new snapshot
+  workflow_dispatch:
+    inputs:
+      bentobox_version:
+        description: "BentoBox JAR to test (leave blank for latest CI build)"
+        required: false
+
+  # Nightly test against latest addon snapshots
+  schedule:
+    - cron: "0 3 * * *"  # 03:00 UTC daily
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout test harness
+        uses: actions/checkout@v4
+        with:
+          repository: BentoBoxWorld/BentoBox   # change if harness lives elsewhere
+          sparse-checkout: test/bbox-test-harness
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: pip install -r test/bbox-test-harness/scripts/requirements.txt
+
+      - name: Download latest release JARs
+        working-directory: test/bbox-test-harness
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p plugins
+          python scripts/fetch_jars.py \
+            --output-dir plugins \
+            --config addons.yml
+
+      - name: List downloaded plugins
+        run: ls -lh test/bbox-test-harness/plugins/
+
+      - name: Start Paper server
+        working-directory: test/bbox-test-harness
+        run: |
+          docker compose up -d
+          echo "Server container started"
+
+      - name: Run integration tests
+        working-directory: test/bbox-test-harness
+        run: |
+          python scripts/run_tests.py \
+            --host localhost \
+            --port 25575 \
+            --password bbox-test-harness \
+            --log-file /tmp/bbox-server.log \
+            --config addons.yml \
+            --junit-output /tmp/junit-results.xml \
+            --timeout 300
+
+      - name: Collect server log
+        if: always()
+        run: |
+          docker logs bbox-test-server > /tmp/bbox-server.log 2>&1 || true
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-results
+          path: /tmp/junit-results.xml
+
+      - name: Upload server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: /tmp/bbox-server.log
+
+      - name: Publish test results
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Integration Test Results
+          path: /tmp/junit-results.xml
+          reporter: java-junit
+
+      - name: Stop server
+        if: always()
+        working-directory: test/bbox-test-harness
+        run: docker compose down -v

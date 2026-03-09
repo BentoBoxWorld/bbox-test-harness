@@ -1,0 +1,30 @@
+# macOS metadata
+.DS_Store
+
+# Docker server volume — generated at runtime, never commit
+server/
+
+# Downloaded JARs — never commit these
+plugins/*.jar
+plugins/BentoBox/addons/
+
+# Paper's remapping cache — generated at runtime
+plugins/.paper-remapped/
+
+# BentoBox runtime-generated content (extracted from JARs on first run)
+plugins/BentoBox/database/
+plugins/BentoBox/database_backup/
+plugins/BentoBox/locales/
+plugins/BentoBox/panels/
+
+# Other plugin runtime data
+plugins/bStats/
+plugins/spark/
+
+# Keep tracked: BentoBox config (committed so the server has it on first boot)
+!plugins/BentoBox/config.yml
+
+# Python
+__pycache__/
+*.pyc
+.venv/

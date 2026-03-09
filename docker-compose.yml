@@ -1,0 +1,41 @@
+services:
+  paper:
+    image: itzg/minecraft-server:latest
+    container_name: bbox-test-server
+    environment:
+      EULA: "TRUE"
+      TYPE: PAPER
+      VERSION: "1.21.11"
+      MEMORY: "4G"
+      # RCON for test script communication
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: "bbox-test-harness"
+      RCON_PORT: "25575"
+      # Deterministic, offline, fast startup
+      ONLINE_MODE: "false"
+      LEVEL_SEED: "12345"
+      DIFFICULTY: "peaceful"
+      VIEW_DISTANCE: "4"
+      SIMULATION_DISTANCE: "2"
+      # Suppress unnecessary output
+      SPAWN_MONSTERS: "false"
+      SPAWN_ANIMALS: "false"
+      SPAWN_NPCS: "false"
+      # Skip world pre-generation delay
+      SKIP_WAIT_FOR_TEMPLATES: "false"
+      # Use server/ dir as the data directory
+      COPY_CONFIG_DEST: /data
+    volumes:
+      # Server config (server.properties, bukkit.yml, etc.)
+      - ./server:/data
+      # Plugin JARs are placed here by fetch_jars.py before docker-compose up
+      - ./plugins:/data/plugins
+    ports:
+      - "25575:25575"
+    healthcheck:
+      test: ["CMD-SHELL", "mc-monitor status --host localhost --port 25565 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 60s
+    restart: "no"
