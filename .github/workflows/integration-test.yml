@@ -1,14 +1,14 @@
 name: BentoBox Integration Tests
 
 on:
-  # Run when BentoBox itself publishes a new snapshot
+  # Run manually, optionally specifying a BentoBox JAR
   workflow_dispatch:
     inputs:
       bentobox_version:
         description: "BentoBox JAR to test (leave blank for latest CI build)"
         required: false
 
-  # Nightly test against latest addon snapshots
+  # Nightly test against latest addon releases
   schedule:
     - cron: "0 3 * * *"  # 03:00 UTC daily
 
@@ -20,9 +20,6 @@ jobs:
     steps:
       - name: Checkout test harness
         uses: actions/checkout@v4
-        with:
-          repository: BentoBoxWorld/BentoBox   # change if harness lives elsewhere
-          sparse-checkout: test/bbox-test-harness
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,29 +27,27 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        run: pip install -r test/bbox-test-harness/scripts/requirements.txt
+        run: pip install -r scripts/requirements.txt
 
       - name: Download latest release JARs
-        working-directory: test/bbox-test-harness
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p plugins
           python scripts/fetch_jars.py \
             --output-dir plugins \
             --config addons.yml
 
       - name: List downloaded plugins
-        run: ls -lh test/bbox-test-harness/plugins/
+        run: |
+          ls -lh plugins/
+          ls -lh plugins/BentoBox/addons/
 
       - name: Start Paper server
-        working-directory: test/bbox-test-harness
         run: |
           docker compose up -d
           echo "Server container started"
 
       - name: Run integration tests
-        working-directory: test/bbox-test-harness
         run: |
           python scripts/run_tests.py \
             --host localhost \
@@ -61,12 +56,11 @@ jobs:
             --log-file /tmp/bbox-server.log \
             --config addons.yml \
             --junit-output /tmp/junit-results.xml \
-            --timeout 300
+            --timeout 600
 
       - name: Collect server log
         if: always()
-        run: |
-          docker logs bbox-test-server > /tmp/bbox-server.log 2>&1 || true
+        run: docker logs bbox-test-server > /tmp/bbox-server.log 2>&1 || true
 
       - name: Upload JUnit results
         if: always()
@@ -92,5 +86,4 @@ jobs:
 
       - name: Stop server
         if: always()
-        working-directory: test/bbox-test-harness
         run: docker compose down -v
