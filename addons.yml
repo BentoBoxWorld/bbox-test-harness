@@ -103,3 +103,4 @@ server_plugins:
     repo: MilkBowl/Vault
   - name: EssentialsX
     repo: EssentialsX/Essentials
+    asset_prefix: EssentialsX-

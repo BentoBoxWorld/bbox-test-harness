@@ -30,11 +30,12 @@ DELAY_WITH_TOKEN = 0.2     # seconds
 DELAY_WITHOUT_TOKEN = 1.5  # seconds
 
 
-def get_latest_release_jar(repo: str, session: requests.Session) -> tuple[str, str] | None:
+def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: str | None = None) -> tuple[str, str] | None:
     """
     Returns (filename, download_url) for the JAR asset in the latest release,
     or None if no JAR asset is found.
     Skips sources/javadoc JARs.
+    If asset_prefix is given, only assets whose name starts with that prefix are considered.
     """
     url = f"{GITHUB_API}/repos/{repo}/releases/latest"
     resp = session.get(url, timeout=15)
@@ -58,6 +59,7 @@ def get_latest_release_jar(repo: str, session: requests.Session) -> tuple[str, s
         asset for asset in release.get("assets", [])
         if asset["name"].endswith(".jar")
         and not any(x in asset["name"] for x in ("-sources", "-javadoc", "-slim"))
+        and (asset_prefix is None or asset["name"].startswith(asset_prefix))
     ]
 
     if not jar_assets:
@@ -187,9 +189,10 @@ def main():
     for entry in config.get("server_plugins", []):
         name = entry["name"]
         repo = entry["repo"]
+        asset_prefix = entry.get("asset_prefix")
         print(f"\n[{name}] {repo}")
         try:
-            result = get_latest_release_jar(repo, session)
+            result = get_latest_release_jar(repo, session, asset_prefix)
             if result:
                 filename, url = result
                 download_jar(name, filename, url, plugins_dir, session)
