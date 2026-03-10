@@ -66,6 +66,8 @@ Add `--debug-log` to `run_tests.py` for verbose output.
 ```
 plugins/
   BentoBox.jar                  ← loaded by Paper
+  Vault.jar                     ← economy API bridge (Paper plugin)
+  EssentialsX-x.x.x.jar        ← economy provider (Paper plugin)
   BentoBox/
     config.yml                  ← committed; controls database, language, etc.
     addons/
@@ -78,8 +80,8 @@ The `server/` directory is NOT committed — it is the Docker volume and is gene
 
 ## Key Configuration Files
 
-- `addons.yml` — Master list of 31 addon GitHub repos (`BentoBoxWorld/AddonName` format), used by `fetch_jars.py` and `run_tests.py`
-- `plugins/BentoBox/config.yml` — JSON database, no economy, en-US language
+- `addons.yml` — Master list of 31 addon GitHub repos (`BentoBoxWorld/AddonName` format) plus a `server_plugins` section for Paper plugins (Vault, EssentialsX), used by `fetch_jars.py` and `run_tests.py`
+- `plugins/BentoBox/config.yml` — JSON database, economy enabled (requires Vault + EssentialsX), en-US language
 - `docker-compose.yml` — Paper server definition; RCON password is `bbox-test-harness`
 
 ## CI (GitHub Actions)

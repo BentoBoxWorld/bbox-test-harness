@@ -132,6 +132,7 @@ def main():
     print(f"\nLayout:")
     print(f"  BentoBox JAR  → {plugins_dir}")
     print(f"  Addon JARs    → {addons_dir}")
+    print(f"  Server plugins → {plugins_dir}")
 
     failed = []
 
@@ -182,12 +183,33 @@ def main():
 
         time.sleep(delay)
 
-    total = 1 + len(config["addons"])  # BentoBox + all addons
+    # ── Server plugins (go into plugins/, same as BentoBox) ──────────────────
+    for entry in config.get("server_plugins", []):
+        name = entry["name"]
+        repo = entry["repo"]
+        print(f"\n[{name}] {repo}")
+        try:
+            result = get_latest_release_jar(repo, session)
+            if result:
+                filename, url = result
+                download_jar(name, filename, url, plugins_dir, session)
+            else:
+                failed.append(name)
+        except requests.HTTPError as e:
+            print(f"  FAIL: HTTP {e.response.status_code}")
+            failed.append(name)
+        except Exception as e:
+            print(f"  FAIL: {e}")
+            failed.append(name)
+
+        time.sleep(delay)
+
+    total = 1 + len(config["addons"]) + len(config.get("server_plugins", []))
     succeeded = total - len(failed)
     print(f"\n{'='*50}")
     print(f"Downloaded {succeeded}/{total} JARs")
-    print(f"  BentoBox → {plugins_dir}")
-    print(f"  Addons   → {addons_dir}")
+    print(f"  BentoBox + server plugins → {plugins_dir}")
+    print(f"  Addons                   → {addons_dir}")
     if failed:
         print(f"Failed: {', '.join(failed)}")
         sys.exit(1)
