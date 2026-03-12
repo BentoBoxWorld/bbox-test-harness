@@ -1,11 +1,11 @@
 services:
   paper:
     image: itzg/minecraft-server:latest
-    container_name: bbox-test-server
+    container_name: ${CONTAINER_NAME:-bbox-test-server}
     environment:
       EULA: "TRUE"
       TYPE: PAPER
-      VERSION: "1.21.11"
+      VERSION: ${MC_VERSION:-1.21.11}
       MEMORY: "4G"
       # RCON for test script communication
       ENABLE_RCON: "true"

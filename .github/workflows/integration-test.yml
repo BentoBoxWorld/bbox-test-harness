@@ -13,9 +13,36 @@ on:
     - cron: "0 3 * * *"  # 03:00 UTC daily
 
 jobs:
+  # Read minecraft_versions from addons.yml and expose as a JSON matrix.
+  # To add/remove versions, edit addons.yml — no workflow changes needed.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.get-versions.outputs.versions }}
+    steps:
+      - name: Checkout test harness
+        uses: actions/checkout@v4
+
+      - name: Read versions from addons.yml
+        id: get-versions
+        run: |
+          versions=$(python3 -c "
+          import yaml, json
+          with open('addons.yml') as f:
+              cfg = yaml.safe_load(f)
+          print(json.dumps(cfg['minecraft_versions']))
+          ")
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
   integration-test:
+    needs: setup
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    strategy:
+      fail-fast: false  # run all versions even if one fails
+      matrix:
+        mc_version: ${{ fromJson(needs.setup.outputs.versions) }}
 
     steps:
       - name: Checkout test harness
@@ -42,48 +69,60 @@ jobs:
           ls -lh plugins/
           ls -lh plugins/BentoBox/addons/
 
-      - name: Start Paper server
+      - name: Start Paper ${{ matrix.mc_version }} server
+        env:
+          MC_VERSION: ${{ matrix.mc_version }}
+          CONTAINER_NAME: bbox-test-${{ matrix.mc_version }}
         run: |
           docker compose up -d
-          echo "Server container started"
+          echo "Server container started (MC ${{ matrix.mc_version }})"
 
       - name: Run integration tests
+        env:
+          MC_VERSION: ${{ matrix.mc_version }}
+          CONTAINER_NAME: bbox-test-${{ matrix.mc_version }}
         run: |
           python scripts/run_tests.py \
             --host localhost \
             --port 25575 \
             --password bbox-test-harness \
-            --log-file /tmp/bbox-server.log \
+            --container bbox-test-${{ matrix.mc_version }} \
+            --log-file /tmp/bbox-server-${{ matrix.mc_version }}.log \
             --config addons.yml \
-            --junit-output /tmp/junit-results.xml \
+            --junit-output /tmp/junit-results-${{ matrix.mc_version }}.xml \
             --timeout 600
 
       - name: Collect server log
         if: always()
-        run: docker logs bbox-test-server > /tmp/bbox-server.log 2>&1 || true
+        run: |
+          docker logs bbox-test-${{ matrix.mc_version }} \
+            > /tmp/bbox-server-${{ matrix.mc_version }}.log 2>&1 || true
 
       - name: Upload JUnit results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-results
-          path: /tmp/junit-results.xml
+          name: junit-results-${{ matrix.mc_version }}
+          path: /tmp/junit-results-${{ matrix.mc_version }}.xml
 
       - name: Upload server log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: server-log
-          path: /tmp/bbox-server.log
+          name: server-log-${{ matrix.mc_version }}
+          path: /tmp/bbox-server-${{ matrix.mc_version }}.log
 
       - name: Publish test results
         if: always()
         uses: dorny/test-reporter@v1
         with:
-          name: Integration Test Results
-          path: /tmp/junit-results.xml
+          name: Integration Tests — MC ${{ matrix.mc_version }}
+          path: /tmp/junit-results-${{ matrix.mc_version }}.xml
           reporter: java-junit
 
       - name: Stop server
         if: always()
+        env:
+          MC_VERSION: ${{ matrix.mc_version }}
+          CONTAINER_NAME: bbox-test-${{ matrix.mc_version }}
         run: docker compose down -v
