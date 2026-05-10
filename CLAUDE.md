@@ -39,7 +39,7 @@ Add `--debug-log` to `run_tests.py` for verbose output.
 
 1. **JAR Procurement** (`scripts/fetch_jars.py`) — Queries GitHub Releases API for latest addon JARs. BentoBox JAR goes to `plugins/`, addon JARs go to `plugins/BentoBox/addons/` (critical: Paper must not see addon JARs directly; they are loaded by BentoBox's own addon loader).
 
-2. **Server Orchestration** (`docker-compose.yml`) — Paper 1.21.11 in Docker, 4GB RAM, RCON on port 25575, peaceful/offline/seed 12345.
+2. **Server Orchestration** (`docker-compose.yml`) — Paper 26.1.2 in Docker, 4GB RAM, RCON on port 25575, peaceful/offline/seed 12345.
 
 3. **Test Execution** (`scripts/run_tests.py`) — Two-phase readiness check (RCON responsive + Paper "Done (Xs)!" line in docker logs), then runs 5 test suites, outputs JUnit XML.
 
