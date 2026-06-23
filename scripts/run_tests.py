@@ -3,17 +3,26 @@
 run_tests.py — BentoBox integration test runner.
 
 Waits for the Paper server to finish loading, then runs a sequence of
-smoke tests via RCON and server log analysis.
+smoke tests by issuing commands on the server console and analysing the
+server log.
+
+Commands are sent over the server console (stdin) via the itzg image's
+`mc-send-to-console`, NOT over RCON. RCON dispatches commands off the main
+thread, and some Paper builds (e.g. 26.2) reject that with
+"Asynchronous Cannot perform command async!". Console commands run on the
+main thread, so they work regardless of the Paper build. This requires the
+container to be started with CREATE_CONSOLE_IN_PIPE=true (see docker-compose.yml).
 
 Usage:
-    python run_tests.py [--host HOST] [--port PORT] [--password PASSWORD]
-                        [--log-file PATH] [--container NAME]
+    python run_tests.py [--log-file PATH] [--container NAME]
                         [--config addons.yml] [--junit-output results.xml]
+    (--host/--port/--password are accepted for backwards compatibility but
+     are no longer used — command execution is console-based.)
 
 Exit codes:
     0 — all tests passed
     1 — one or more tests failed
-    2 — server failed to start / could not connect
+    2 — server failed to start
 """
 
 import argparse
@@ -30,19 +39,17 @@ SCRIPT_DIR = Path(__file__).parent
 
 import yaml
 
-try:
-    from mcrcon import MCRcon
-except ImportError:
-    print("ERROR: mcrcon is not installed. Run: pip install mcrcon")
-    sys.exit(2)
-
 
 RCON_HOST = "localhost"
 RCON_PORT = 25575
 RCON_PASSWORD = "bbox-test-harness"
 DOCKER_CONTAINER = "bbox-test-server"
-STARTUP_TIMEOUT = 600  # seconds total budget (RCON + Done line) — 30 addons + world gen can be slow
-STARTUP_POLL = 5       # seconds between connection/log-poll attempts
+STARTUP_TIMEOUT = 600  # seconds total budget (startup + Done line) — 30 addons + world gen can be slow
+STARTUP_POLL = 5       # seconds between log-poll attempts
+CMD_MAX_WAIT = 25      # max seconds to wait for a single command's console output
+# `mc-send-to-console` refuses to run unless invoked as the server user (the itzg
+# image's default runtime UID is 1000); `docker exec` otherwise defaults to root.
+CONSOLE_UID = "1000"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -116,44 +123,30 @@ def get_log_text(log_file: str | None, container: str) -> str:
 # Server startup wait
 # ─────────────────────────────────────────────────────────────
 
-def wait_for_server(host: str, port: int, password: str, timeout: int,
-                    container: str = "bbox-test-server") -> bool:
+def wait_for_server(timeout: int, container: str = "bbox-test-server") -> bool:
     """Wait for the server to be fully ready.
 
-    Phase 1 — RCON alive: polls until RCON accepts connections (Paper process up,
-    but plugins may still be loading).
+    Phase 1 — container up: polls until the container is producing log output
+    (Paper process started, but plugins may still be loading).
 
     Phase 2 — Done line: polls docker logs until Paper prints its
     'Done (Xs)! For help' line, which is only emitted once all plugins have
     loaded, all worlds have generated, and the server is fully open for play.
-
-    mcrcon uses signal.SIGALRM internally, which can fire during time.sleep()
-    and raise MCRconException outside the inner try block. We guard both
-    sleep() calls in their own try/except for this reason.
     """
     deadline = time.time() + timeout
 
-    # ── Phase 1: wait for RCON ───────────────────────────────────────────────
-    print(f"Phase 1 — waiting for RCON at {host}:{port} (timeout={timeout}s)...")
-    attempts = 0
-    rcon_ready = False
+    # ── Phase 1: wait for the container to start logging ─────────────────────
+    print(f"Phase 1 — waiting for container '{container}' to start (timeout={timeout}s)...")
+    container_up = False
     while time.time() < deadline:
-        try:
-            with MCRcon(host, password, port=port, timeout=30) as mcr:
-                mcr.command("list")
-                elapsed = attempts * STARTUP_POLL
-                print(f"  RCON ready after ~{elapsed}s")
-                rcon_ready = True
-                break
-        except Exception:
-            attempts += 1
-            try:
-                time.sleep(STARTUP_POLL)
-            except Exception:
-                pass
+        if _docker_logs(container).strip():
+            print("  Container is up and producing logs")
+            container_up = True
+            break
+        time.sleep(STARTUP_POLL)
 
-    if not rcon_ready:
-        print(f"  TIMEOUT: RCON never responded within {timeout}s")
+    if not container_up:
+        print(f"  TIMEOUT: container '{container}' produced no logs within {timeout}s")
         return False
 
     # ── Phase 2: wait for Paper's "Done" line in the log ────────────────────
@@ -186,15 +179,94 @@ def wait_for_server(host: str, port: int, password: str, timeout: int,
 
 
 # ─────────────────────────────────────────────────────────────
-# RCON helpers
+# Console command helpers
 # ─────────────────────────────────────────────────────────────
 
-def rcon(mcr: MCRcon, command: str) -> str:
-    """Send a command and return the stripped response."""
-    # RCON responses contain Minecraft color codes — strip them
-    raw = mcr.command(command)
-    clean = re.sub(r"§[0-9a-fk-orA-FK-OR]", "", raw)
-    return clean.strip()
+def _docker_logs(container: str) -> str:
+    """Return the full current server log from the container, quietly.
+
+    stderr is merged into stdout (stderr=STDOUT) so lines stay in chronological,
+    append-only order. Concatenating stdout+stderr separately would interleave
+    the two streams incorrectly (Paper logs and JVM warnings go to different
+    streams), which breaks the offset-based output capture in console_command().
+    """
+    try:
+        r = subprocess.run(
+            ["docker", "logs", container],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", timeout=30,
+        )
+        return r.stdout
+    except Exception:
+        return ""
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SECTION_RE = re.compile(r"§[0-9a-fk-orA-FK-OR]")
+# Paper console prefixes, e.g. "[17:19:13 INFO]: " and "[17:19:13] [Server thread/INFO]: "
+_PREFIX_THREAD_RE = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]\s\[[^\]]+\]:\s?")
+_PREFIX_PLAIN_RE = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\s+[A-Za-z]+\]:\s?")
+
+
+def _clean_line(line: str) -> str:
+    """Strip ANSI/section colour codes and the Paper log prefix from a log line."""
+    line = _ANSI_RE.sub("", line)
+    line = _SECTION_RE.sub("", line)
+    line = _PREFIX_THREAD_RE.sub("", line, count=1)
+    line = _PREFIX_PLAIN_RE.sub("", line, count=1)
+    return line.rstrip()
+
+
+def _send_to_console(container: str, *args: str) -> subprocess.CompletedProcess:
+    """Write a command to the server's console named pipe via `mc-send-to-console`."""
+    return subprocess.run(
+        ["docker", "exec", "--user", CONSOLE_UID, container, "mc-send-to-console", *args],
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+_marker_seq = 0
+
+
+def console_command(container: str, command: str, max_wait: float = CMD_MAX_WAIT) -> str:
+    """Run a command on the server console (main thread) and return its output.
+
+    Sends the command to the server's console named pipe via the itzg image's
+    `mc-send-to-console` (requires CREATE_CONSOLE_IN_PIPE=true). Console commands
+    run on the main thread, avoiding the async-dispatch rejection that RCON hits
+    on Paper 26.2+.
+
+    Output is captured deterministically: immediately after the command, a unique
+    `say <marker>` is sent. Console commands are processed in order on the main
+    thread, so once the marker appears in the log, the target command's output is
+    exactly the log lines between our starting offset and the marker line. This
+    avoids racing against unrelated/lazy log output (e.g. JVM warnings).
+    """
+    global _marker_seq
+    _marker_seq += 1
+    marker = f"BBOXTESTMARK{_marker_seq}X{int(time.time() * 1000) % 1000000}"
+
+    before = len(_docker_logs(container).splitlines())
+
+    send = _send_to_console(container, *command.split())
+    if send.returncode != 0:
+        detail = (send.stderr or send.stdout or "").strip()
+        return f"ERROR: could not send '{command}' to console: {detail}"
+    _send_to_console(container, "say", marker)
+
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        lines = _docker_logs(container).splitlines()
+        for i in range(before, len(lines)):
+            if marker in lines[i]:
+                # Everything between our offset and the marker line is the response.
+                resp = [_clean_line(l) for l in lines[before:i]]
+                return "\n".join(resp).strip()
+        time.sleep(0.3)
+
+    # Marker never appeared — return the raw delta so failures are still diagnosable.
+    lines = _docker_logs(container).splitlines()
+    return "\n".join(_clean_line(l) for l in lines[before:]).strip()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -238,7 +310,7 @@ def test_core_load(bbox_v: str) -> TestSuite:
 
 def test_addon_enabled(bbox_v: str, addon_names: list[str]) -> TestSuite:
     """
-    Check that each addon reports (ENABLED) in the 'bbox v' RCON output.
+    Check that each addon reports (ENABLED) in the 'bbox v' console output.
 
     'bbox v' lists every loaded addon with its status:
         AcidIsland 1.20.1 (ENABLED)
@@ -283,7 +355,7 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str]) -> TestSuite:
 
 def test_worlds_registered(bbox_v: str, expected_worlds: list[str]) -> TestSuite:
     """
-    Check that each expected game world appears in the 'bbox v' RCON output.
+    Check that each expected game world appears in the 'bbox v' console output.
 
     'bbox v' lists loaded game worlds:
         acidisland_world (AcidIsland): Overworld, Nether, The End
@@ -310,7 +382,7 @@ def test_worlds_registered(bbox_v: str, expected_worlds: list[str]) -> TestSuite
     return suite
 
 
-def test_commands_registered(mcr: MCRcon) -> TestSuite:
+def test_commands_registered(container: str) -> TestSuite:
     """
     Verify key BentoBox and addon commands are registered by running them
     with no arguments and checking for usage/help output rather than
@@ -318,9 +390,9 @@ def test_commands_registered(mcr: MCRcon) -> TestSuite:
     """
     suite = TestSuite("Command Registration")
 
-    # Each entry: (rcon_command, expected_pattern, label)
+    # Each entry: (command, expected_pattern, label)
     # "only available in-game" is an acceptable response — it means the command
-    # IS registered with the server; it just needs a player sender (not RCON).
+    # IS registered with the server; it just needs a player sender (not console).
     commands_to_check = [
         # BentoBox core
         ("bbox",      r"(bentobox|usage|admin|version)",        "BentoBox admin"),
@@ -337,12 +409,12 @@ def test_commands_registered(mcr: MCRcon) -> TestSuite:
     ]
 
     for cmd, pattern, label in commands_to_check:
-        response = rcon(mcr, cmd)
+        response = console_command(container, cmd)
         matched   = bool(re.search(pattern, response, re.IGNORECASE))
         unknown   = "unknown command" in response.lower()
         in_game   = "only available in-game" in response.lower()
         # Pass if pattern matched, or if the server says "in-game only"
-        # (command is registered; RCON just lacks a player context)
+        # (command is registered; the console just lacks a player context)
         passed = (matched and not unknown) or in_game
         suite.add(
             f"/{cmd} — {label}",
@@ -447,10 +519,12 @@ def write_junit_xml(suites: list[TestSuite], output_path: str):
 # ─────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="BentoBox RCON integration test runner")
-    parser.add_argument("--host", default=RCON_HOST)
-    parser.add_argument("--port", type=int, default=RCON_PORT)
-    parser.add_argument("--password", default=RCON_PASSWORD)
+    parser = argparse.ArgumentParser(description="BentoBox integration test runner (console-based)")
+    # --host/--port/--password are accepted for backwards compatibility (the CI
+    # workflow passes them) but are unused: commands run over the server console.
+    parser.add_argument("--host", default=RCON_HOST, help=argparse.SUPPRESS)
+    parser.add_argument("--port", type=int, default=RCON_PORT, help=argparse.SUPPRESS)
+    parser.add_argument("--password", default=RCON_PASSWORD, help=argparse.SUPPRESS)
     parser.add_argument("--log-file", default=None,
                         help="Path to write/read the server log (fetched via docker logs if missing)")
     parser.add_argument("--container", default=DOCKER_CONTAINER,
@@ -481,9 +555,8 @@ def main():
         "stranger_world",
     ]
 
-    # Wait for server — two-phase: RCON alive, then Paper "Done" line in log
-    if not wait_for_server(args.host, args.port, args.password, args.timeout,
-                           container=args.container):
+    # Wait for server — two-phase: container up, then Paper "Done" line in log
+    if not wait_for_server(args.timeout, container=args.container):
         print("FATAL: Server never became fully ready. Aborting tests.")
         sys.exit(2)
 
@@ -527,16 +600,15 @@ def main():
     # Run all suites
     # Fetch 'bbox v' once — it drives Core Load, Addon Load, and World Registration.
     all_suites: list[TestSuite] = []
-    with MCRcon(args.host, args.password, port=args.port, timeout=30) as mcr:
-        print("\nFetching 'bbox v' output via RCON...")
-        bbox_v = rcon(mcr, "bbox v")
-        print(f"  Got {len(bbox_v)} chars")
+    print("\nFetching 'bbox v' output via the server console...")
+    bbox_v = console_command(args.container, "bbox v")
+    print(f"  Got {len(bbox_v)} chars")
 
-        print("\n--- Suite: Core Load ---")
-        all_suites.append(test_core_load(bbox_v))
+    print("\n--- Suite: Core Load ---")
+    all_suites.append(test_core_load(bbox_v))
 
-        print("--- Suite: Command Registration ---")
-        all_suites.append(test_commands_registered(mcr))
+    print("--- Suite: Command Registration ---")
+    all_suites.append(test_commands_registered(args.container))
 
     print("--- Suite: Addon Load ---")
     all_suites.append(test_addon_enabled(bbox_v, addon_names))

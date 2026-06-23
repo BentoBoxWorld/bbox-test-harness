@@ -7,7 +7,12 @@ services:
       TYPE: PAPER
       VERSION: ${MC_VERSION:-26.1.2}
       MEMORY: "4G"
-      # RCON for test script communication
+      # Console input pipe (/tmp/minecraft-console-in) so the test harness can run
+      # commands on the server MAIN THREAD via `mc-send-to-console`. RCON dispatches
+      # commands off the main thread, which Paper 26.2+ rejects with
+      # "Cannot perform command async!" — so the harness uses the console instead.
+      CREATE_CONSOLE_IN_PIPE: "true"
+      # RCON is left enabled for ad-hoc debugging, but the harness no longer uses it.
       ENABLE_RCON: "true"
       RCON_PASSWORD: "bbox-test-harness"
       RCON_PORT: "25575"
