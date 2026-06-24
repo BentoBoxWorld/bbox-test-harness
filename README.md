@@ -1,6 +1,6 @@
 # BentoBox Integration Test Harness
 
-Automates smoke testing of BentoBox and all its addons on a live Paper server using Docker + RCON.
+Automates smoke testing of BentoBox and all its addons on a live Paper server using Docker. Commands are issued over the server console (main thread) rather than RCON, so it works on Paper 26.2+ where RCON rejects off-main-thread command dispatch.
 
 ## What it tests
 
@@ -19,7 +19,7 @@ bbox-test-harness/
 ├── docker-compose.yml              Paper server definition (itzg/minecraft-server)
 ├── addons.yml                      Master list of addons + GitHub repos
 ├── server/
-│   └── server.properties           RCON enabled, offline-mode, peaceful, small view distance
+│   └── server.properties           offline-mode, peaceful, small view distance (console pipe set in compose)
 ├── plugins/                        Mounted as /data/plugins inside the container
 │   ├── BentoBox-x.y.z.jar          (git-ignored) — BentoBox plugin JAR
 │   └── BentoBox/
@@ -30,7 +30,7 @@ bbox-test-harness/
 └── scripts/
     ├── requirements.txt
     ├── fetch_jars.py               Downloads latest release JARs from GitHub
-    └── run_tests.py                RCON + log test runner → JUnit XML output
+    └── run_tests.py                console + log test runner → JUnit XML output
 ```
 
 > **Important**: Addon JARs go in `plugins/BentoBox/addons/`, **not** `plugins/`. BentoBox has its own addon loader that reads from that directory — Paper's plugin loader must not see them.
@@ -119,4 +119,4 @@ Edit `addons.yml` and add an entry under `addons:`:
 
 ## Extending the tests
 
-`run_tests.py` is structured as composable `TestSuite` functions. To add a new check, either append to an existing suite or add a new `test_*` function and call it from `main()`. The `rcon()` helper strips Minecraft colour codes so you can use plain regex against the response.
+`run_tests.py` is structured as composable `TestSuite` functions. To add a new check, either append to an existing suite or add a new `test_*` function and call it from `main()`. The `console_command()` helper sends a command to the server console (via `mc-send-to-console`), captures its output from the server-log delta using a unique marker, and strips Minecraft colour codes and log prefixes so you can use plain regex against the response.

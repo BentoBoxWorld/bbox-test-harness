@@ -4,7 +4,7 @@ This file provides guidance to Claude when working with code in this repository.
 
 ## Overview
 
-BentoBox Integration Test Harness: automated smoke testing for BentoBox (Minecraft plugin) and 31 addons. Uses Docker + RCON to spin up a Paper Minecraft server and validates that BentoBox core and all addons load correctly.
+BentoBox Integration Test Harness: automated smoke testing for BentoBox (Minecraft plugin) and 31 addons. Uses Docker to spin up a Paper Minecraft server and validates that BentoBox core and all addons load correctly. Commands are issued over the server **console** (main thread) via the itzg image's `mc-send-to-console`, not RCON — RCON dispatches commands off the main thread, which Paper 26.2+ rejects with "Cannot perform command async!".
 
 ## Commands
 
@@ -39,25 +39,25 @@ Add `--debug-log` to `run_tests.py` for verbose output.
 
 1. **JAR Procurement** (`scripts/fetch_jars.py`) — Queries GitHub Releases API for latest addon JARs. BentoBox JAR goes to `plugins/`, addon JARs go to `plugins/BentoBox/addons/` (critical: Paper must not see addon JARs directly; they are loaded by BentoBox's own addon loader).
 
-2. **Server Orchestration** (`docker-compose.yml`) — Paper 26.1.2 in Docker, 4GB RAM, RCON on port 25575, peaceful/offline/seed 12345.
+2. **Server Orchestration** (`docker-compose.yml`) — Paper in Docker, 4GB RAM, peaceful/offline/seed 12345. `CREATE_CONSOLE_IN_PIPE=true` enables the console input pipe used for command execution. RCON is left enabled for ad-hoc debugging but the harness no longer uses it.
 
-3. **Test Execution** (`scripts/run_tests.py`) — Two-phase readiness check (RCON responsive + Paper "Done (Xs)!" line in docker logs), then runs 5 test suites, outputs JUnit XML.
+3. **Test Execution** (`scripts/run_tests.py`) — Two-phase readiness check (container producing logs + Paper "Done (Xs)!" line in docker logs), then runs 5 test suites, outputs JUnit XML. Commands run via `console_command()`: send through `mc-send-to-console` (as `--user 1000`), then capture the command's output from the `docker logs` delta, bounded by a unique `say` marker.
 
 ## Test Suites (run_tests.py)
 
 | Suite | What it checks |
 |-------|---------------|
-| `test_core_load` | `bbox v` RCON response contains version, database type, and addon list |
-| `test_addon_enabled` | Each of 31 addons reports `(ENABLED)` in `bbox v` RCON output |
-| `test_worlds_registered` | 9 game worlds appear in `bbox v` RCON output (acidisland, bskyblock, caveblock, oneblock, parkour, poseidon, skygrid, stranger, boxed) |
-| `test_commands_registered` | 10 key commands respond via RCON: `bbox`, `bsbadmin`, `acid`, `obadmin`, `cbadmin`, `boxadmin`, `sgadmin`, `padmin`, `stranger`, `parkour` |
+| `test_core_load` | `bbox v` console response contains version, database type, and addon list |
+| `test_addon_enabled` | Each of 31 addons reports `(ENABLED)` in `bbox v` console output |
+| `test_worlds_registered` | 9 game worlds appear in `bbox v` console output (acidisland, bskyblock, caveblock, oneblock, parkour, poseidon, skygrid, stranger, boxed) |
+| `test_commands_registered` | 10 key commands respond via the console: `bbox`, `bsbadmin`, `acid`, `obadmin`, `cbadmin`, `boxadmin`, `sgadmin`, `padmin`, `stranger`, `parkour` |
 | `test_no_console_errors` | No ERROR/SEVERE in BentoBox/addon log context; filters bStats noise |
 
 **Notes on test design:**
-- `test_addon_enabled` and `test_worlds_registered` use the `bbox v` RCON command (not log scraping) — this is the authoritative post-load status.
-- `test_commands_registered` accepts "only available in-game" as a pass — it means the command IS registered, it just requires a player sender that RCON cannot provide.
+- `test_addon_enabled` and `test_worlds_registered` use the `bbox v` console command (not log scraping) — this is the authoritative post-load status.
+- `test_commands_registered` accepts "only available in-game" as a pass — it means the command IS registered, it just requires a player sender that the console cannot provide.
 - `test_no_console_errors` uses `docker logs` output.
-- The startup wait has a 600s budget shared across both phases: phase 1 waits for RCON to respond, phase 2 waits for Paper's `Done (Xs)!` line (which only appears after all plugins and worlds are fully loaded).
+- The startup wait has a 600s budget shared across both phases: phase 1 waits for the container to start producing logs, phase 2 waits for Paper's `Done (Xs)!` line (which only appears after all plugins and worlds are fully loaded).
 
 **Exit codes:** 0 = all pass, 1 = test failures, 2 = server failed to start.
 
