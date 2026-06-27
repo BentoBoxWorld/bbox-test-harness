@@ -123,6 +123,59 @@ def get_log_text(log_file: str | None, container: str) -> str:
 # Server startup wait
 # ─────────────────────────────────────────────────────────────
 
+def _container_running(container: str) -> bool:
+    """True if the container is currently running (not exited/crashed)."""
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", container],
+            capture_output=True, text=True, timeout=15,
+        )
+        return r.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
+def _extract_crash(log_text: str) -> str:
+    """If the server log shows a fatal crash, return a concise excerpt; else "".
+
+    Looks for Paper's top-level crash markers and returns the exception block plus,
+    if present, the first BentoBox-addon stack frame — which usually names the
+    addon responsible (e.g. a populator spawning an entity during chunk gen).
+    """
+    lines = log_text.splitlines()
+    is_crash = any(
+        ("Encountered an unexpected exception" in l
+         or "unrecoverableChunkSystemFailure" in l
+         or "crash report has been saved" in l)
+        for l in lines
+    )
+    if not is_crash:
+        return ""
+
+    # Build a focused summary instead of dumping the full (mostly internal) stack:
+    # the top-level exception, each "Caused by:" (the real root cause), any
+    # BentoBox-addon stack frame (names the culprit), and the stop/crash line.
+    picked: list[str] = []
+    for raw in lines:
+        s = _clean_line(raw).strip()
+        if not s:
+            continue
+        if "Encountered an unexpected exception" in s or s.startswith("Caused by:"):
+            picked.append(s)
+        elif ".jar//world.bentobox" in raw:
+            picked.append(s if s.startswith("at ") else "at " + s)
+        elif "crash report has been saved" in s or s.endswith("Stopping server"):
+            picked.append(s)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for l in picked:
+        if l not in seen:
+            seen.add(l)
+            out.append(l)
+    return "\n".join(out[:25])
+
+
 def wait_for_server(timeout: int, container: str = "bbox-test-server") -> bool:
     """Wait for the server to be fully ready.
 
@@ -152,27 +205,39 @@ def wait_for_server(timeout: int, container: str = "bbox-test-server") -> bool:
     # ── Phase 2: wait for Paper's "Done" line in the log ────────────────────
     # Paper logs: [HH:MM:SS INFO]: Done (47.832s)! For help, type "help"
     # This is emitted only after all plugins have loaded and worlds are ready.
+    #
+    # `docker logs` keeps returning output after the container has exited, so a
+    # crashed server's "Done" line is still visible. We therefore (a) check for a
+    # fatal crash first, and (b) confirm the container is actually still running
+    # before declaring the server ready — otherwise commands would later fail with
+    # the confusing "container is not running".
     remaining = deadline - time.time()
     print(f"Phase 2 — waiting for server 'Done' in log (up to {int(remaining)}s remaining)...")
     done_pattern = re.compile(r"Done \(\d+[\d.]*s\)!")
     while time.time() < deadline:
-        try:
-            log = subprocess.run(
-                ["docker", "logs", container],
-                capture_output=True, text=True, errors="replace"
-            )
-            combined = log.stdout + log.stderr
-            if done_pattern.search(combined):
-                # Extract the Done line for a nice message
-                match = re.search(r"Done \(\d+[\d.]*s\)!.*", combined)
+        log = _docker_logs(container)
+
+        crash = _extract_crash(log)
+        if crash:
+            print("  Server CRASHED during startup:")
+            print(crash)
+            return False
+
+        if done_pattern.search(log):
+            if _container_running(container):
+                match = re.search(r"Done \(\d+[\d.]*s\)!.*", log)
                 print(f"  Server fully ready: {match.group(0) if match else 'Done'}")
                 return True
-        except Exception as e:
-            print(f"  WARNING: could not read docker logs: {e}")
-        try:
-            time.sleep(STARTUP_POLL)
-        except Exception:
-            pass
+            print("  Server logged 'Done' but the container is no longer running — it crashed.")
+            print(_extract_crash(log) or "  (no crash report found in log)")
+            return False
+
+        if not _container_running(container):
+            print("  Container exited before startup completed — server crashed.")
+            print(_extract_crash(log) or "  (no crash report found in log)")
+            return False
+
+        time.sleep(STARTUP_POLL)
 
     print(f"  TIMEOUT: Server 'Done' line never appeared within {timeout}s")
     return False
@@ -557,8 +622,22 @@ def main():
 
     # Wait for server — two-phase: container up, then Paper "Done" line in log
     if not wait_for_server(args.timeout, container=args.container):
-        print("FATAL: Server never became fully ready. Aborting tests.")
-        sys.exit(2)
+        log_text = get_log_text(args.log_file, args.container)
+        crash = _extract_crash(log_text)
+        # Emit a JUnit failure so the CI test reporter shows a clear cause rather
+        # than an opaque "container is not running" on every later command.
+        suite = TestSuite("Server Startup")
+        suite.add(
+            "Server reached ready state without crashing",
+            False,
+            crash or "Server did not reach 'Done' within the timeout (no crash report found).",
+        )
+        if args.junit_output:
+            write_junit_xml([suite], args.junit_output)
+        print("\nFATAL: Server never became fully ready (crash or timeout). Aborting tests.")
+        if crash:
+            print("\n--- crash excerpt ---\n" + crash)
+        sys.exit(1)
 
     # Fetch log text now (server is confirmed fully started) — used by multiple suites
     print("Fetching server log...")
