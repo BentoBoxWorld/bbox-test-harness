@@ -597,7 +597,14 @@ def test_no_console_errors(log_text: str,
 
     lines = log_text.splitlines()
     if skip_addons:
-        skip_re = re.compile("|".join(re.escape(name) for name in skip_addons), re.IGNORECASE)
+        patterns = [re.escape(name) for name in skip_addons]
+        # Paper's plugin loader rejects an incompatible addon's Pladdon with a
+        # stack-trace line that names only the API version, not the addon, e.g.
+        #   org.bukkit.plugin.InvalidPluginException: Unsupported API version 1.21.11
+        # Filter those too, keyed on each skipped addon's declared min_api.
+        for min_api in set(skip_addons.values()):
+            patterns.append(rf"Unsupported API version\s+{re.escape(min_api)}")
+        skip_re = re.compile("|".join(patterns), re.IGNORECASE)
         lines = [l for l in lines if not skip_re.search(l)]
 
     # ERROR/SEVERE lines mentioning BentoBox or addon packages
