@@ -42,6 +42,10 @@ addons:
 
   - name: CaveBlock
     repo: BentoBoxWorld/CaveBlock
+    # CaveBlock now targets Minecraft API 1.21.11 and refuses to load on older
+    # servers. When the server's MC version is below this, the harness treats
+    # CaveBlock's load/world/command checks as SKIPPED (a warning), not failures.
+    min_api: "1.21.11"
 
   - name: Challenges
     repo: BentoBoxWorld/Challenges

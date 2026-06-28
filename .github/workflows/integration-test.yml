@@ -87,6 +87,7 @@ jobs:
             --port 25575 \
             --password bbox-test-harness \
             --container bbox-test-${{ matrix.mc_version }} \
+            --mc-version ${{ matrix.mc_version }} \
             --log-file /tmp/bbox-server-${{ matrix.mc_version }}.log \
             --config addons.yml \
             --junit-output /tmp/junit-results-${{ matrix.mc_version }}.xml \

@@ -57,6 +57,7 @@ Add `--debug-log` to `run_tests.py` for verbose output.
 - `test_addon_enabled` and `test_worlds_registered` use the `bbox v` console command (not log scraping) — this is the authoritative post-load status.
 - `test_commands_registered` accepts "only available in-game" as a pass — it means the command IS registered, it just requires a player sender that the console cannot provide.
 - `test_no_console_errors` uses `docker logs` output.
+- **API-version skips:** an addon may declare `min_api` in `addons.yml` (its lowest supported Minecraft API). When the server runs an older MC version, that addon legitimately won't load — so its addon/world/command checks are recorded as **SKIPPED** (a warning, JUnit `<skipped>`), not failures, and its log noise is excluded from `test_no_console_errors`. The current MC version comes from `--mc-version` (defaults to the `MC_VERSION` env var). CaveBlock declares `min_api: 1.21.11`, so it is skipped on 1.21.5/1.21.7/1.21.8/1.21.10 and tested normally on 1.21.11 / 26.x.
 - The startup wait has a 600s budget shared across both phases: phase 1 waits for the container to start producing logs, phase 2 waits for Paper's `Done (Xs)!` line (which only appears after all plugins and worlds are fully loaded).
 
 **Exit codes:** 0 = all pass, 1 = test failures, 2 = server failed to start.
@@ -80,7 +81,7 @@ The `server/` directory is NOT committed — it is the Docker volume and is gene
 
 ## Key Configuration Files
 
-- `addons.yml` — Master list of 31 addon GitHub repos (`BentoBoxWorld/AddonName` format) plus a `server_plugins` section for Paper plugins (Vault, EssentialsX), used by `fetch_jars.py` and `run_tests.py`
+- `addons.yml` — Master list of 31 addon GitHub repos (`BentoBoxWorld/AddonName` format) plus a `server_plugins` section for Paper plugins (Vault, EssentialsX) and the `minecraft_versions` test matrix, used by `fetch_jars.py` and `run_tests.py`. An addon entry may carry an optional `min_api` (lowest supported Minecraft API) — when the server is older, the harness skips that addon instead of failing.
 - `plugins/BentoBox/config.yml` — JSON database, economy enabled (requires Vault + EssentialsX), en-US language
 - `docker-compose.yml` — Paper server definition; RCON password is `bbox-test-harness`
 

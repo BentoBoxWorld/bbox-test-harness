@@ -26,6 +26,7 @@ Exit codes:
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -62,6 +63,7 @@ class TestResult:
     passed: bool
     message: str = ""
     suite: str = "BentoBox Integration Tests"
+    skipped: bool = False
 
 
 @dataclass
@@ -69,16 +71,54 @@ class TestSuite:
     name: str
     results: list[TestResult] = field(default_factory=list)
 
-    def add(self, name: str, passed: bool, message: str = ""):
-        self.results.append(TestResult(name=name, passed=passed, message=message, suite=self.name))
+    def add(self, name: str, passed: bool, message: str = "", skipped: bool = False):
+        self.results.append(
+            TestResult(name=name, passed=passed, message=message, suite=self.name, skipped=skipped)
+        )
 
     @property
     def passed(self):
-        return sum(1 for r in self.results if r.passed)
+        return sum(1 for r in self.results if r.passed and not r.skipped)
 
     @property
     def failed(self):
-        return sum(1 for r in self.results if not r.passed)
+        return sum(1 for r in self.results if not r.passed and not r.skipped)
+
+    @property
+    def skipped(self):
+        return sum(1 for r in self.results if r.skipped)
+
+
+# ─────────────────────────────────────────────────────────────
+# Minecraft version compatibility
+# ─────────────────────────────────────────────────────────────
+
+def parse_mc_version(version: str) -> tuple[int, ...]:
+    """Parse an MC version string ('1.21.11', '26.2') into a comparable tuple.
+
+    Mojang's calendar scheme (26.x) sorts naturally after the old 1.21.x scheme
+    because the leading component (26 vs 1) dominates the tuple comparison.
+    """
+    return tuple(int(p) for p in re.findall(r"\d+", version))
+
+
+def find_incompatible_addons(config: dict, mc_version: str | None) -> dict[str, str]:
+    """Map addon name → required min API for addons that can't run on this server.
+
+    An addon entry in addons.yml may declare `min_api` (the lowest Minecraft API
+    version it supports). When the server runs an older MC version, that addon
+    will not load — and that is expected, not a failure. Returns {} when the MC
+    version is unknown (no env/flag), so nothing is skipped by accident.
+    """
+    if not mc_version:
+        return {}
+    server = parse_mc_version(mc_version)
+    incompatible: dict[str, str] = {}
+    for addon in config.get("addons", []):
+        min_api = addon.get("min_api")
+        if min_api and parse_mc_version(min_api) > server:
+            incompatible[addon["name"]] = min_api
+    return incompatible
 
 
 # ─────────────────────────────────────────────────────────────
@@ -373,7 +413,8 @@ def test_core_load(bbox_v: str) -> TestSuite:
     return suite
 
 
-def test_addon_enabled(bbox_v: str, addon_names: list[str]) -> TestSuite:
+def test_addon_enabled(bbox_v: str, addon_names: list[str],
+                       skip_addons: dict[str, str] | None = None) -> TestSuite:
     """
     Check that each addon reports (ENABLED) in the 'bbox v' console output.
 
@@ -383,8 +424,13 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str]) -> TestSuite:
 
     This is the authoritative post-load state, more reliable than log
     scraping because it reflects the final status after all enabling logic.
+
+    Addons in `skip_addons` (name → required min API) declare a higher minimum
+    Minecraft API than this server provides, so they are expected not to load —
+    they are recorded as SKIPPED (a warning), not a failure.
     """
     suite = TestSuite("Addon Load")
+    skip_addons = skip_addons or {}
 
     if not bbox_v:
         suite.add("bbox v output available", False,
@@ -392,6 +438,16 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str]) -> TestSuite:
         return suite
 
     for addon_name in addon_names:
+        if addon_name in skip_addons:
+            suite.add(
+                f"{addon_name} is ENABLED",
+                True,
+                f"SKIPPED: {addon_name} requires Minecraft API {skip_addons[addon_name]}, "
+                f"newer than this server — incompatibility is expected, not a failure",
+                skipped=True,
+            )
+            continue
+
         enabled_pattern = re.compile(
             rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(ENABLED\)",
             re.IGNORECASE | re.MULTILINE
@@ -418,22 +474,38 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str]) -> TestSuite:
     return suite
 
 
-def test_worlds_registered(bbox_v: str, expected_worlds: list[str]) -> TestSuite:
+def test_worlds_registered(bbox_v: str, expected_worlds: list[tuple[str, str]],
+                          skip_addons: dict[str, str] | None = None) -> TestSuite:
     """
     Check that each expected game world appears in the 'bbox v' console output.
 
     'bbox v' lists loaded game worlds:
         acidisland_world (AcidIsland): Overworld, Nether, The End
         bskyblock_world (BSkyBlock): Overworld, Nether, The End
+
+    `expected_worlds` is a list of (world_name, owning_addon) pairs. A world whose
+    owning addon is in `skip_addons` (incompatible with this server's MC version)
+    is recorded as SKIPPED rather than a failure.
     """
     suite = TestSuite("World Registration")
+    skip_addons = skip_addons or {}
 
     if not bbox_v:
         suite.add("bbox v output available", False,
                   "No 'bbox v' response — cannot verify world registration")
         return suite
 
-    for world_name in expected_worlds:
+    for world_name, owner in expected_worlds:
+        if owner in skip_addons:
+            suite.add(
+                f"World '{world_name}' registered",
+                True,
+                f"SKIPPED: {owner} requires Minecraft API {skip_addons[owner]}, "
+                f"newer than this server — world is expected to be absent",
+                skipped=True,
+            )
+            continue
+
         pattern = re.compile(
             rf"\b{re.escape(world_name)}\b",
             re.IGNORECASE
@@ -447,33 +519,49 @@ def test_worlds_registered(bbox_v: str, expected_worlds: list[str]) -> TestSuite
     return suite
 
 
-def test_commands_registered(container: str) -> TestSuite:
+def test_commands_registered(container: str,
+                            skip_addons: dict[str, str] | None = None) -> TestSuite:
     """
     Verify key BentoBox and addon commands are registered by running them
     with no arguments and checking for usage/help output rather than
     'Unknown command'.
+
+    Commands owned by an addon in `skip_addons` (incompatible with this server's
+    MC version) are recorded as SKIPPED rather than a failure.
     """
     suite = TestSuite("Command Registration")
+    skip_addons = skip_addons or {}
 
-    # Each entry: (command, expected_pattern, label)
+    # Each entry: (command, expected_pattern, label, owning_addon)
     # "only available in-game" is an acceptable response — it means the command
     # IS registered with the server; it just needs a player sender (not console).
+    # owning_addon is None for core commands (always expected).
     commands_to_check = [
         # BentoBox core
-        ("bbox",      r"(bentobox|usage|admin|version)",        "BentoBox admin"),
+        ("bbox",      r"(bentobox|usage|admin|version)",        "BentoBox admin",         None),
         # Game-mode admin commands (confirmed names from tastybento)
-        ("bsbadmin",  r"(usage|bsb|skyblock|sub-command)",      "BSkyBlock admin"),
-        ("acid",      r"(usage|acid|acidisland|sub-command)",   "AcidIsland command"),
-        ("obadmin",   r"(usage|ob|oneblock|sub-command)",       "AOneBlock admin"),
-        ("cbadmin",   r"(usage|cb|caveblock|sub-command)",      "CaveBlock admin"),
-        ("boxadmin",  r"(usage|box|boxed|sub-command)",         "Boxed admin"),
-        ("sgadmin",   r"(usage|sg|skygrid|sub-command)",        "SkyGrid admin"),
-        ("padmin",    r"(usage|poseidon|sub-command)",          "Poseidon admin"),
-        ("stranger",  r"(usage|stranger|sub-command)",          "StrangerRealms command"),
-        ("parkour",   r"(usage|parkour|sub-command)",           "Parkour command"),
+        ("bsbadmin",  r"(usage|bsb|skyblock|sub-command)",      "BSkyBlock admin",        "BSkyBlock"),
+        ("acid",      r"(usage|acid|acidisland|sub-command)",   "AcidIsland command",     "AcidIsland"),
+        ("obadmin",   r"(usage|ob|oneblock|sub-command)",       "AOneBlock admin",        "AOneBlock"),
+        ("cbadmin",   r"(usage|cb|caveblock|sub-command)",      "CaveBlock admin",        "CaveBlock"),
+        ("boxadmin",  r"(usage|box|boxed|sub-command)",         "Boxed admin",            "Boxed"),
+        ("sgadmin",   r"(usage|sg|skygrid|sub-command)",        "SkyGrid admin",          "SkyGrid"),
+        ("padmin",    r"(usage|poseidon|sub-command)",          "Poseidon admin",         "Poseidon"),
+        ("stranger",  r"(usage|stranger|sub-command)",          "StrangerRealms command", "StrangerRealms"),
+        ("parkour",   r"(usage|parkour|sub-command)",           "Parkour command",        "Parkour"),
     ]
 
-    for cmd, pattern, label in commands_to_check:
+    for cmd, pattern, label, owner in commands_to_check:
+        if owner and owner in skip_addons:
+            suite.add(
+                f"/{cmd} — {label}",
+                True,
+                f"SKIPPED: {owner} requires Minecraft API {skip_addons[owner]}, "
+                f"newer than this server — command is expected to be absent",
+                skipped=True,
+            )
+            continue
+
         response = console_command(container, cmd)
         matched   = bool(re.search(pattern, response, re.IGNORECASE))
         unknown   = "unknown command" in response.lower()
@@ -489,12 +577,18 @@ def test_commands_registered(container: str) -> TestSuite:
     return suite
 
 
-def test_no_console_errors(log_text: str) -> TestSuite:
+def test_no_console_errors(log_text: str,
+                          skip_addons: dict[str, str] | None = None) -> TestSuite:
     """
     Parse the server log for WARN/ERROR/SEVERE entries related to BentoBox
     or any addon. This is the log-file equivalent of your current manual scan.
+
+    Lines mentioning an addon in `skip_addons` are ignored: that addon is known
+    to be incompatible with this server's MC version, so any load warning/error
+    it produces is expected, not a regression.
     """
     suite = TestSuite("Console Health")
+    skip_addons = skip_addons or {}
 
     if not log_text:
         suite.add("Log available for health checks", False,
@@ -502,6 +596,9 @@ def test_no_console_errors(log_text: str) -> TestSuite:
         return suite
 
     lines = log_text.splitlines()
+    if skip_addons:
+        skip_re = re.compile("|".join(re.escape(name) for name in skip_addons), re.IGNORECASE)
+        lines = [l for l in lines if not skip_re.search(l)]
 
     # ERROR/SEVERE lines mentioning BentoBox or addon packages
     bbox_errors = [
@@ -565,12 +662,16 @@ def write_junit_xml(suites: list[TestSuite], output_path: str):
         ts = ET.SubElement(root, "testsuite",
                            name=suite.name,
                            tests=str(len(suite.results)),
-                           failures=str(suite.failed))
+                           failures=str(suite.failed),
+                           skipped=str(suite.skipped))
         for result in suite.results:
             tc = ET.SubElement(ts, "testcase",
                                name=result.name,
                                classname=result.suite)
-            if not result.passed:
+            if result.skipped:
+                skipped = ET.SubElement(tc, "skipped", message=result.message[:500])
+                skipped.text = result.message
+            elif not result.passed:
                 failure = ET.SubElement(tc, "failure", message=result.message[:500])
                 failure.text = result.message
     tree = ET.ElementTree(root)
@@ -600,6 +701,9 @@ def main():
     parser.add_argument("--junit-output", default=None,
                         help="Write JUnit XML results to this path (for CI)")
     parser.add_argument("--timeout", type=int, default=STARTUP_TIMEOUT)
+    parser.add_argument("--mc-version", default=os.environ.get("MC_VERSION"),
+                        help="Minecraft version under test (defaults to the MC_VERSION env var). "
+                             "Used to skip addons whose declared min_api is newer than this server.")
     args = parser.parse_args()
 
     # Load addon list
@@ -607,17 +711,27 @@ def main():
         config = yaml.safe_load(f)
     addon_names = [a["name"] for a in config["addons"]]
 
-    # Expected game worlds (world name prefix from BentoBox startup log)
+    # Addons that can't run on this MC version (declared via `min_api` in addons.yml).
+    # Their load/world/command checks become SKIPPED warnings instead of failures.
+    skip_addons = find_incompatible_addons(config, args.mc_version)
+    if skip_addons:
+        print(f"\nMinecraft {args.mc_version}: the following addons require a newer API "
+              f"and will be skipped (warnings, not failures):")
+        for name, min_api in skip_addons.items():
+            print(f"  - {name} (requires API {min_api})")
+
+    # Expected game worlds as (world name prefix, owning addon) so worlds belonging
+    # to a skipped/incompatible addon can be skipped too.
     expected_worlds = [
-        "acidisland_world",
-        "boxed_world",
-        "bskyblock_world",
-        "caveblock-world",
-        "oneblock_world",
-        "parkour_world",
-        "poseidon_world",
-        "skygrid-world",
-        "stranger_world",
+        ("acidisland_world", "AcidIsland"),
+        ("boxed_world",      "Boxed"),
+        ("bskyblock_world",  "BSkyBlock"),
+        ("caveblock-world",  "CaveBlock"),
+        ("oneblock_world",   "AOneBlock"),
+        ("parkour_world",    "Parkour"),
+        ("poseidon_world",   "Poseidon"),
+        ("skygrid-world",    "SkyGrid"),
+        ("stranger_world",   "StrangerRealms"),
     ]
 
     # Wait for server — two-phase: container up, then Paper "Done" line in log
@@ -687,16 +801,16 @@ def main():
     all_suites.append(test_core_load(bbox_v))
 
     print("--- Suite: Command Registration ---")
-    all_suites.append(test_commands_registered(args.container))
+    all_suites.append(test_commands_registered(args.container, skip_addons))
 
     print("--- Suite: Addon Load ---")
-    all_suites.append(test_addon_enabled(bbox_v, addon_names))
+    all_suites.append(test_addon_enabled(bbox_v, addon_names, skip_addons))
 
     print("--- Suite: World Registration ---")
-    all_suites.append(test_worlds_registered(bbox_v, expected_worlds))
+    all_suites.append(test_worlds_registered(bbox_v, expected_worlds, skip_addons))
 
     print("--- Suite: Console Health ---")
-    all_suites.append(test_no_console_errors(log_text))
+    all_suites.append(test_no_console_errors(log_text, skip_addons))
 
     # Print results
     print(f"\n{'='*60}")
@@ -704,19 +818,25 @@ def main():
     print(f"{'='*60}")
     total_pass = 0
     total_fail = 0
+    total_skip = 0
     for suite in all_suites:
-        print(f"\n  {suite.name}  ({suite.passed} pass, {suite.failed} fail)")
+        counts = f"{suite.passed} pass, {suite.failed} fail"
+        if suite.skipped:
+            counts += f", {suite.skipped} skip"
+        print(f"\n  {suite.name}  ({counts})")
         for result in suite.results:
-            icon = "✓" if result.passed else "✗"
+            icon = "⊘" if result.skipped else ("✓" if result.passed else "✗")
             print(f"    [{icon}] {result.name}")
-            if not result.passed and result.message:
+            if (result.skipped or not result.passed) and result.message:
                 for line in result.message.splitlines()[:3]:
                     print(f"          {line}")
         total_pass += suite.passed
         total_fail += suite.failed
+        total_skip += suite.skipped
 
     print(f"\n{'='*60}")
-    print(f"  TOTAL: {total_pass} passed, {total_fail} failed")
+    skip_note = f", {total_skip} skipped" if total_skip else ""
+    print(f"  TOTAL: {total_pass} passed, {total_fail} failed{skip_note}")
     print(f"{'='*60}\n")
 
     if args.junit_output:
