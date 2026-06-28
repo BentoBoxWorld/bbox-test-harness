@@ -117,6 +117,15 @@ Edit `addons.yml` and add an entry under `addons:`:
   repo: BentoBoxWorld/MyAddon
 ```
 
+If an addon only supports a newer Minecraft version, add `min_api` so older servers
+in the matrix skip it (recorded as a warning, not a failure) instead of failing:
+
+```yaml
+- name: CaveBlock
+  repo: BentoBoxWorld/CaveBlock
+  min_api: "1.21.11"   # skipped on servers older than 1.21.11
+```
+
 ## Extending the tests
 
 `run_tests.py` is structured as composable `TestSuite` functions. To add a new check, either append to an existing suite or add a new `test_*` function and call it from `main()`. The `console_command()` helper sends a command to the server console (via `mc-send-to-console`), captures its output from the server-log delta using a unique marker, and strips Minecraft colour codes and log prefixes so you can use plain regex against the response.
