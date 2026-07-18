@@ -70,6 +70,7 @@ class TestResult:
 class TestSuite:
     name: str
     results: list[TestResult] = field(default_factory=list)
+    duration: float = 0.0  # wall-clock seconds; written as JUnit `time`
 
     def add(self, name: str, passed: bool, message: str = "", skipped: bool = False):
         self.results.append(
@@ -670,11 +671,17 @@ def write_junit_xml(suites: list[TestSuite], output_path: str):
                            name=suite.name,
                            tests=str(len(suite.results)),
                            failures=str(suite.failed),
-                           skipped=str(suite.skipped))
+                           skipped=str(suite.skipped),
+                           time=f"{suite.duration:.3f}")
+        # Per-test durations aren't tracked (most cases parse one shared
+        # console response), so split the suite's time evenly across cases —
+        # reporters sum/read `time` and render NaN when it's absent.
+        per_case = suite.duration / len(suite.results) if suite.results else 0.0
         for result in suite.results:
             tc = ET.SubElement(ts, "testcase",
                                name=result.name,
-                               classname=result.suite)
+                               classname=result.suite,
+                               time=f"{per_case:.3f}")
             if result.skipped:
                 skipped = ET.SubElement(tc, "skipped", message=result.message[:500])
                 skipped.text = result.message
@@ -804,20 +811,18 @@ def main():
     bbox_v = console_command(args.container, "bbox v")
     print(f"  Got {len(bbox_v)} chars")
 
-    print("\n--- Suite: Core Load ---")
-    all_suites.append(test_core_load(bbox_v))
+    def run_suite(label: str, fn, *fn_args) -> None:
+        print(f"--- Suite: {label} ---")
+        start = time.monotonic()
+        suite = fn(*fn_args)
+        suite.duration = time.monotonic() - start
+        all_suites.append(suite)
 
-    print("--- Suite: Command Registration ---")
-    all_suites.append(test_commands_registered(args.container, skip_addons))
-
-    print("--- Suite: Addon Load ---")
-    all_suites.append(test_addon_enabled(bbox_v, addon_names, skip_addons))
-
-    print("--- Suite: World Registration ---")
-    all_suites.append(test_worlds_registered(bbox_v, expected_worlds, skip_addons))
-
-    print("--- Suite: Console Health ---")
-    all_suites.append(test_no_console_errors(log_text, skip_addons))
+    run_suite("Core Load", test_core_load, bbox_v)
+    run_suite("Command Registration", test_commands_registered, args.container, skip_addons)
+    run_suite("Addon Load", test_addon_enabled, bbox_v, addon_names, skip_addons)
+    run_suite("World Registration", test_worlds_registered, bbox_v, expected_worlds, skip_addons)
+    run_suite("Console Health", test_no_console_errors, log_text, skip_addons)
 
     # Print results
     print(f"\n{'='*60}")
