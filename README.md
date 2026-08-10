@@ -126,6 +126,29 @@ in the matrix skip it (recorded as a warning, not a failure) instead of failing:
   min_api: "1.21.11"   # skipped on servers older than 1.21.11
 ```
 
+A game mode also needs its world added to `expected_worlds` and its admin command
+to `commands_to_check`, both in `scripts/run_tests.py`.
+
+## Silencing a known-benign log line
+
+`test_no_console_errors` fails on any BentoBox/addon `ERROR`, `SEVERE` or `WARN`.
+When a line is genuinely harmless, add a regex to `log_whitelist` in `addons.yml`
+**with the reason it is safe** — an unexplained whitelist decays into "ignore
+everything" and the check goes quietly blind:
+
+```yaml
+log_whitelist:
+  - pattern: "Unknown listing in blocks section:"
+    reason: >
+      Level's config targets current Minecraft, so older servers in the matrix
+      report materials that do not exist yet. Tracks server age, not a defect.
+```
+
+Every run prints how many lines each pattern swallowed, so a pattern that has
+grown too broad shows up in the CI output. Prefer fixing the addon over
+whitelisting; if you must whitelist a real bug to keep the matrix green, mark it
+`KNOWN BUG` and delete the entry when the upstream fix ships.
+
 ## Extending the tests
 
 `run_tests.py` is structured as composable `TestSuite` functions. To add a new check, either append to an existing suite or add a new `test_*` function and call it from `main()`. The `console_command()` helper sends a command to the server console (via `mc-send-to-console`), captures its output from the server-log delta using a unique marker, and strips Minecraft colour codes and log prefixes so you can use plain regex against the response.

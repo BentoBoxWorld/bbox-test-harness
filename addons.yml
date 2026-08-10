@@ -123,6 +123,62 @@ addons:
   - name: Warps
     repo: BentoBoxWorld/Warps
 
+# Known-benign log lines that must not fail `test_no_console_errors`.
+# Each entry is a regex matched against the whole log line, plus the reason it
+# is safe to ignore. Always record the reason: an unexplained whitelist decays
+# into "ignore everything" and the suite goes quietly blind.
+#
+# The runner prints a per-pattern hit count on every run, so a pattern that has
+# started swallowing far more than it should is visible in the CI output.
+log_whitelist:
+  - pattern: "Unknown listing in blocks section:"
+    reason: >
+      Level's blocks config is written for current Minecraft, so on older
+      servers in the matrix it lists materials that do not exist yet (shelves,
+      the copper/oxidation family, cinnabar and sulfur, the new spawners).
+      98 hits on 1.21.7, zero on 26.2 — it tracks server age, not a defect.
+
+  - pattern: "Bad block material in "
+    reason: >
+      Same class as above, from AOneBlock's phase config (e.g. DRIED_GHAST,
+      which is 1.21.6+ content). Only fires on servers older than the addon.
+
+  - pattern: "Item \\w+ has quantity \\d+ which exceeds max \\d+\\. Clamping to"
+    reason: >
+      BentoBox core clamps oversized stack counts in shipped blueprints
+      (RED_MUSHROOM 100, BASALT/SOUL_SAND 128) against the 99 cap. Cosmetic —
+      it reports the fix it already applied.
+
+  - pattern: "The error 'No key layers in MapLike\\[\\{\\}\\]' is normal and not an error"
+    reason: Poseidon says so itself in the message — it is world-gen noise.
+
+  - pattern: "depends on development version of BentoBox plugin"
+    reason: >
+      Expected here by design: the harness deliberately runs addon releases
+      against the newest BentoBox, which is what this warns about.
+
+  - pattern: "has its own Border, so do not use Border addon"
+    reason: >
+      StrangerRealms advising against the Border addon. The harness loads all
+      33 addons together on purpose, so this combination is expected.
+
+  - pattern: "No blueprint bundles found! Creating a default one\\."
+    reason: First-boot informational message from BentoBox core, mis-levelled as ERROR.
+
+  # --- Known upstream bugs. These are REAL, not benign. They are listed here
+  # --- only so a pre-existing defect does not hold the whole matrix red; delete
+  # --- each entry once the upstream fix ships, so the suite starts guarding it.
+  - pattern: "Mob chances add up to > 100% in \\w+ biome recipe!"
+    reason: >
+      KNOWN BUG (Greenhouses): shipped biomes.yml has PLAINS mob weights summing
+      over 100%, so SHEEP is dropped. Fires on every MC version — not version
+      drift. Remove this entry when Greenhouses fixes its config.
+
+  - pattern: "Duplicate locale file '[^']+': '[^']+' already exists"
+    reason: >
+      KNOWN BUG (Border): ships both zh_CN.yml and zh-CN.yml, so one is ignored.
+      Remove this entry when Border drops the underscore version.
+
 server_plugins:
   - name: Vault
     repo: MilkBowl/Vault

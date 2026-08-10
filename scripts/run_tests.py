@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -588,7 +589,9 @@ def test_commands_registered(container: str,
 _STACK_FRAME_RE = re.compile(r"^\s+(at\s|\.\.\.\s|Caused by:)|^Caused by:")
 # Paper stamps the level inside the timestamp bracket ("[01:49:40 ERROR]:"), so a
 # bare "\[ERROR\]" never matches; allow the optional timestamp prefix.
-_LOG_LEVEL_RE = re.compile(r"\[(?:[\d:]+\s+)?(WARN|ERROR|SEVERE)\]")
+_LOG_LEVEL_RE   = re.compile(r"\[(?:[\d:]+\s+)?(WARN|ERROR|SEVERE)\]")
+_ERROR_LEVEL_RE = re.compile(r"\[(?:[\d:]+\s+)?(ERROR|SEVERE)\]")
+_WARN_LEVEL_RE  = re.compile(r"\[(?:[\d:]+\s+)?WARN\]")
 
 
 def _strip_incompatible_addon_reports(lines: list[str], skip_addons: dict[str, str]) -> list[str]:
@@ -632,7 +635,8 @@ def _strip_incompatible_addon_reports(lines: list[str], skip_addons: dict[str, s
 
 
 def test_no_console_errors(log_text: str,
-                          skip_addons: dict[str, str] | None = None) -> TestSuite:
+                          skip_addons: dict[str, str] | None = None,
+                          whitelist: list[dict] | None = None) -> TestSuite:
     """
     Parse the server log for WARN/ERROR/SEVERE entries related to BentoBox
     or any addon. This is the log-file equivalent of your current manual scan.
@@ -640,6 +644,11 @@ def test_no_console_errors(log_text: str,
     Lines mentioning an addon in `skip_addons` are ignored: that addon is known
     to be incompatible with this server's MC version, so any load warning/error
     it produces is expected, not a regression.
+
+    `whitelist` is the `log_whitelist` section of addons.yml — a list of
+    {pattern, reason} entries naming known-benign lines. Matches are dropped
+    before the checks below, but their count is reported so a whitelist that has
+    quietly grown to swallow everything is visible rather than invisible.
     """
     suite = TestSuite("Console Health")
     skip_addons = skip_addons or {}
@@ -662,19 +671,40 @@ def test_no_console_errors(log_text: str,
         skip_re = re.compile("|".join(patterns), re.IGNORECASE)
         lines = [l for l in lines if not skip_re.search(l)]
 
+    # Known-benign lines, declared with a reason in addons.yml's log_whitelist.
+    whitelisted: Counter = Counter()
+    if whitelist:
+        compiled = [(re.compile(e["pattern"]), e["pattern"]) for e in whitelist]
+        kept = []
+        for line in lines:
+            for rx, src in compiled:
+                if rx.search(line):
+                    whitelisted[src] += 1
+                    break
+            else:
+                kept.append(line)
+        lines = kept
+
     # ERROR/SEVERE lines mentioning BentoBox or addon packages
     bbox_errors = [
         line for line in lines
-        if re.search(r"\[(ERROR|SEVERE)\]", line)
+        if _ERROR_LEVEL_RE.search(line)
         and re.search(r"(bentobox|BentoBox|addon)", line, re.IGNORECASE)
     ]
     bbox_warns = [
         line for line in lines
-        if "[WARN]" in line
+        if _WARN_LEVEL_RE.search(line)
         and re.search(r"(bentobox|BentoBox|addon)", line, re.IGNORECASE)
         and "No metrics" not in line
         and "bStats" not in line
     ]
+
+    if whitelisted:
+        total = sum(whitelisted.values())
+        print(f"  Console Health: {total} whitelisted log line(s) ignored "
+              f"({len(whitelisted)} of {len(whitelist)} patterns matched):")
+        for pattern, count in whitelisted.most_common():
+            print(f"    {count:>4}x  {pattern}")
 
     suite.add(
         "No BentoBox ERROR/SEVERE in log",
@@ -779,6 +809,18 @@ def main():
         config = yaml.safe_load(f)
     addon_names = [a["name"] for a in config["addons"]]
 
+    # Known-benign log lines (see the log_whitelist section of addons.yml).
+    # Validate up front: a bad regex here would otherwise silently match nothing
+    # and the whitelist would look like it was working.
+    whitelist = config.get("log_whitelist") or []
+    for entry in whitelist:
+        if "pattern" not in entry or "reason" not in entry:
+            sys.exit(f"log_whitelist entry needs both 'pattern' and 'reason': {entry}")
+        try:
+            re.compile(entry["pattern"])
+        except re.error as exc:
+            sys.exit(f"log_whitelist pattern {entry['pattern']!r} is not a valid regex: {exc}")
+
     # Addons that can't run on this MC version (declared via `min_api` in addons.yml).
     # Their load/world/command checks become SKIPPED warnings instead of failures.
     skip_addons = find_incompatible_addons(config, args.mc_version)
@@ -878,7 +920,7 @@ def main():
     run_suite("Command Registration", test_commands_registered, args.container, skip_addons)
     run_suite("Addon Load", test_addon_enabled, bbox_v, addon_names, skip_addons)
     run_suite("World Registration", test_worlds_registered, bbox_v, expected_worlds, skip_addons)
-    run_suite("Console Health", test_no_console_errors, log_text, skip_addons)
+    run_suite("Console Health", test_no_console_errors, log_text, skip_addons, whitelist)
 
     # Print results
     print(f"\n{'='*60}")
