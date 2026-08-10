@@ -45,7 +45,7 @@ bbox-test-harness/
 
 ### Getting a GitHub token
 
-All the addon repos are public, so the token needs **no special permissions at all** — it is used only to identify your requests and raise the API rate limit from 60 to 5,000 requests/hour, preventing the 403 errors you'll otherwise hit when querying ~32 repos in quick succession.
+All the addon repos are public, so the token needs **no special permissions at all** — it is used only to identify your requests and raise the API rate limit from 60 to 5,000 requests/hour, preventing the 403 errors you'll otherwise hit when querying ~34 repos in quick succession.
 
 1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**
    (or visit https://github.com/settings/personal-access-tokens/new directly)
@@ -106,7 +106,7 @@ The workflow at `.github/workflows/integration-test.yml` runs nightly and can al
 4. Publishes results as a JUnit report in the Actions UI
 5. Uploads the full server log as an artifact
 
-Add `GITHUB_TOKEN` as a repository secret. The token needs no special scopes (read-only public access is enough) — it's used purely to avoid GitHub's burst rate limit when querying 32 repos in sequence. In GitHub Actions, `secrets.GITHUB_TOKEN` is available automatically.
+Add `GITHUB_TOKEN` as a repository secret. The token needs no special scopes (read-only public access is enough) — it's used purely to avoid GitHub's burst rate limit when querying 34 repos in sequence. In GitHub Actions, `secrets.GITHUB_TOKEN` is available automatically.
 
 ## Adding a new addon
 

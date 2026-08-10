@@ -56,6 +56,9 @@ addons:
   - name: CheckMeOut
     repo: BentoBoxWorld/CheckMeOut
 
+  - name: ChunkBlock
+    repo: BentoBoxWorld/ChunkBlock
+
   - name: ControlPanel
     repo: BentoBoxWorld/ControlPanel
 
@@ -100,6 +103,13 @@ addons:
 
   - name: StrangerRealms
     repo: BentoBoxWorld/StrangerRealms
+
+  - name: TradeWinds
+    repo: BentoBoxWorld/TradeWinds
+    # TradeWinds uses the Adventure Dialog API (net.kyori.adventure.dialog.DialogLike),
+    # which first ships with Paper 1.21.6. On older servers it throws
+    # NoClassDefFoundError during onEnable, so the harness skips its checks there.
+    min_api: "1.21.6"
 
   - name: TwerkingForTrees
     repo: BentoBoxWorld/TwerkingForTrees

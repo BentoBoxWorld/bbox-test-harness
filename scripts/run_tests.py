@@ -45,7 +45,7 @@ RCON_HOST = "localhost"
 RCON_PORT = 25575
 RCON_PASSWORD = "bbox-test-harness"
 DOCKER_CONTAINER = "bbox-test-server"
-STARTUP_TIMEOUT = 600  # seconds total budget (startup + Done line) — 30 addons + world gen can be slow
+STARTUP_TIMEOUT = 900  # seconds total budget (startup + Done line) — 33 addons + world gen can be slow
 STARTUP_POLL = 5       # seconds between log-poll attempts
 CMD_MAX_WAIT = 25      # max seconds to wait for a single command's console output
 # `mc-send-to-console` refuses to run unless invoked as the server user (the itzg
@@ -449,12 +449,14 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str],
             )
             continue
 
+        # BentoBox 3.22+ pads the status parentheses ("AcidIsland 2.1.1 ( ENABLED )");
+        # older versions did not. Tolerate both.
         enabled_pattern = re.compile(
-            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(ENABLED\)",
+            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(\s*ENABLED\s*\)",
             re.IGNORECASE | re.MULTILINE
         )
         disabled_pattern = re.compile(
-            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(DISABLED\)",
+            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(\s*DISABLED\s*\)",
             re.IGNORECASE | re.MULTILINE
         )
 
@@ -545,6 +547,10 @@ def test_commands_registered(container: str,
         ("acid",      r"(usage|acid|acidisland|sub-command)",   "AcidIsland command",     "AcidIsland"),
         ("obadmin",   r"(usage|ob|oneblock|sub-command)",       "AOneBlock admin",        "AOneBlock"),
         ("cbadmin",   r"(usage|cb|caveblock|sub-command)",      "CaveBlock admin",        "CaveBlock"),
+        # No short alias in these two patterns: 'ch'/'tw' are short enough to match
+        # incidental text in an error response and turn a failure into a pass.
+        ("chadmin",   r"(usage|chunkblock|sub-command)",        "ChunkBlock admin",       "ChunkBlock"),
+        ("twadmin",   r"(usage|tradewinds|sub-command)",        "TradeWinds admin",       "TradeWinds"),
         ("boxadmin",  r"(usage|box|boxed|sub-command)",         "Boxed admin",            "Boxed"),
         ("sgadmin",   r"(usage|sg|skygrid|sub-command)",        "SkyGrid admin",          "SkyGrid"),
         ("padmin",    r"(usage|poseidon|sub-command)",          "Poseidon admin",         "Poseidon"),
@@ -578,6 +584,53 @@ def test_commands_registered(container: str,
     return suite
 
 
+# A stack-trace continuation line: "\tat foo.Bar(...)", "\t... 12 more", "Caused by: ...".
+_STACK_FRAME_RE = re.compile(r"^\s+(at\s|\.\.\.\s|Caused by:)|^Caused by:")
+# Paper stamps the level inside the timestamp bracket ("[01:49:40 ERROR]:"), so a
+# bare "\[ERROR\]" never matches; allow the optional timestamp prefix.
+_LOG_LEVEL_RE = re.compile(r"\[(?:[\d:]+\s+)?(WARN|ERROR|SEVERE)\]")
+
+
+def _strip_incompatible_addon_reports(lines: list[str], skip_addons: dict[str, str]) -> list[str]:
+    """Drop BentoBox's whole "incompatible addon" report for each skipped addon.
+
+    When an addon is too new for the server, BentoBox emits a fixed block:
+
+        [WARN]  [BentoBox] Skipping TradeWinds as it is incompatible ...
+        [WARN]  [BentoBox] Do you need to update your BentoBox?
+        [WARN]  [BentoBox] NOTE: DO NOT report this as a bug ...
+        [ERROR] [BentoBox] If you really think this is an error, report this stack trace ...
+        [ERROR] [BentoBox] java.lang.NoClassDefFoundError: net/kyori/adventure/dialog/DialogLike
+                at TradeWinds-0.2.0.jar//world.bentobox.tradewinds.TradeWinds.onEnable(...)
+                at BentoBox-3.22.2.jar//...AddonsManager.enableAddon(...)
+
+    Only the first line and the first stack frame name the addon, so per-line
+    name filtering leaves the exception header and the BentoBox-owned frames
+    behind. Suppression therefore starts at the "Skipping <addon>" marker and
+    runs until the first line that is neither a stack frame nor a WARN/ERROR —
+    i.e. the natural end of the report — so unrelated later errors still surface.
+    """
+    if not skip_addons:
+        return lines
+
+    start_re = re.compile(
+        r"Skipping\s+(" + "|".join(re.escape(n) for n in skip_addons) + r")\s+as it is incompatible",
+        re.IGNORECASE,
+    )
+    kept: list[str] = []
+    suppressing = False
+    for line in lines:
+        if start_re.search(line):
+            suppressing = True
+            continue
+        if suppressing:
+            if _STACK_FRAME_RE.search(line) or _LOG_LEVEL_RE.search(line):
+                continue
+            suppressing = False
+        kept.append(line)
+    return kept
+
+
 def test_no_console_errors(log_text: str,
                           skip_addons: dict[str, str] | None = None) -> TestSuite:
     """
@@ -598,6 +651,7 @@ def test_no_console_errors(log_text: str,
 
     lines = log_text.splitlines()
     if skip_addons:
+        lines = _strip_incompatible_addon_reports(lines, skip_addons)
         patterns = [re.escape(name) for name in skip_addons]
         # Paper's plugin loader rejects an incompatible addon's Pladdon with a
         # stack-trace line that names only the API version, not the addon, e.g.
@@ -741,11 +795,13 @@ def main():
         ("boxed_world",      "Boxed"),
         ("bskyblock_world",  "BSkyBlock"),
         ("caveblock-world",  "CaveBlock"),
+        ("chunkblock_world", "ChunkBlock"),
         ("oneblock_world",   "AOneBlock"),
         ("parkour_world",    "Parkour"),
         ("poseidon_world",   "Poseidon"),
         ("skygrid-world",    "SkyGrid"),
         ("stranger_world",   "StrangerRealms"),
+        ("tradewinds_world", "TradeWinds"),
     ]
 
     # Wait for server — two-phase: container up, then Paper "Done" line in log
