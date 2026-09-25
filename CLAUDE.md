@@ -22,6 +22,10 @@ python scripts/fetch_jars.py --bentobox-jar ~/path/to/BentoBox-x.y.z-SNAPSHOT.ja
 
 # Latest release only
 python scripts/fetch_jars.py
+
+# Last successful CodeMC Jenkins build, a specific release tag, or a JAR URL
+python scripts/fetch_jars.py --bentobox ci
+python scripts/fetch_jars.py --bentobox 3.23.0
 ```
 
 ### Run Tests
@@ -61,6 +65,7 @@ Add `--debug-log` to `run_tests.py` for verbose output.
 - **API-version skips:** an addon may declare `min_api` in `addons.yml` (its lowest supported Minecraft API). When the server runs an older MC version, that addon legitimately won't load — so its addon/world/command checks are recorded as **SKIPPED** (a warning, JUnit `<skipped>`), not failures, and its log noise is excluded from `test_no_console_errors`. The current MC version comes from `--mc-version` (defaults to the `MC_VERSION` env var). CaveBlock declares `min_api: 1.21.11`, so it is skipped on 1.21.5/1.21.7/1.21.8/1.21.10 and tested normally on 1.21.11 / 26.x. TradeWinds declares `min_api: 1.21.6` (it uses the Adventure Dialog API, first shipped in Paper 1.21.6), so it is skipped only on 1.21.5.
 - **Log whitelist:** `test_no_console_errors` drops lines matching the `log_whitelist` regexes in `addons.yml` before asserting. Every entry carries a `reason`, and the runner prints a per-pattern hit count each run so a pattern that starts swallowing more than it should is visible in CI output. A malformed entry (missing key, bad regex) aborts the run rather than silently matching nothing. Two entries are marked KNOWN BUG (Greenhouses `biomes.yml` mob weights, Border's duplicate `zh_CN.yml`) — delete those once upstream fixes ship so the suite starts guarding them again.
   - Note the biggest class, Level's `Unknown listing in blocks section:` (98 lines on 1.21.7, 0 on 26.2), is **first-run only**: Level rewrites its own config afterwards, pruning the unknown blocks. Local re-runs won't reproduce it; CI, which extracts configs fresh every job, always will.
+- The WARN check counts **events**, not lines: a message plus its stack frames, or BentoBox's whole `***** Disclaimer *****` banner. It keeps an event if any of its lines mentions BentoBox or an addon, then groups events by source (addon tag, else first addon JAR in the trace, else BentoBox). The failure message lists one line per group (`AcidIsland ×9 (369 lines): ServerInternalException: ...`) so a real problem isn't hidden behind the disclaimer.
 - The skip filter in `test_no_console_errors` also strips BentoBox's full "Skipping *addon* as it is incompatible" report — the boilerplate WARNs plus the trailing `NoClassDefFoundError` stack trace — because only the first line and the first stack frame name the addon.
 - The startup wait has a 900s budget shared across both phases: phase 1 waits for the container to start producing logs, phase 2 waits for Paper's `Done (Xs)!` line (which only appears after all plugins and worlds are fully loaded).
 
@@ -91,6 +96,6 @@ The `server/` directory is NOT committed — it is the Docker volume and is gene
 
 ## CI (GitHub Actions)
 
-`.github/workflows/integration-test.yml` runs nightly at 03:00 UTC and on manual dispatch. Steps: checkout → fetch JARs → start Docker server → run tests → collect logs → upload artifacts → publish results via `dorny/test-reporter`.
+`.github/workflows/integration-test.yml` runs nightly at 03:00 UTC and on manual dispatch. The dispatch input `bentobox_version` is passed to `fetch_jars.py --bentobox` (blank = latest published release, `ci` = CodeMC `lastSuccessfulBuild`, a tag, or a URL); the Jenkins job URL is `bentobox.ci_job` in `addons.yml`. Steps: checkout → fetch JARs → start Docker server → run tests → collect logs → upload artifacts → publish results via `dorny/test-reporter`.
 
 `GITHUB_TOKEN` is auto-provided by GitHub Actions (no secret setup needed). Use a PAT locally for the higher rate limit (5,000 req/hr vs 60 unauthenticated).

@@ -5,8 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       bentobox_version:
-        description: "BentoBox JAR to test (leave blank for latest CI build)"
+        description: "BentoBox to test: blank = latest release, 'ci' = latest CodeMC build, a release tag (e.g. 3.23.0), or a JAR URL"
         required: false
+        default: ""
 
   # Nightly test against latest addon releases
   schedule:
@@ -56,13 +57,17 @@ jobs:
       - name: Install Python deps
         run: pip install -r scripts/requirements.txt
 
-      - name: Download latest release JARs
+      - name: Download JARs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed through env, not interpolated into the script, so free-text
+          # input can't inject shell. Empty on scheduled runs → latest release.
+          BENTOBOX_VERSION: ${{ inputs.bentobox_version }}
         run: |
           python scripts/fetch_jars.py \
             --output-dir plugins \
-            --config addons.yml
+            --config addons.yml \
+            --bentobox "$BENTOBOX_VERSION"
 
       - name: List downloaded plugins
         run: |
