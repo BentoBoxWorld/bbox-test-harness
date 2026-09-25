@@ -31,18 +31,20 @@ DELAY_WITH_TOKEN = 0.2     # seconds
 DELAY_WITHOUT_TOKEN = 1.5  # seconds
 
 
-def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: str | None = None) -> tuple[str, str] | None:
+def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: str | None = None,
+                           tag: str | None = None) -> tuple[str, str] | None:
     """
-    Returns (filename, download_url) for the JAR asset in the latest release,
-    or None if no JAR asset is found.
+    Returns (filename, download_url) for the JAR asset in the latest release
+    (or the release with the given tag), or None if no JAR asset is found.
     Skips sources/javadoc JARs.
     If asset_prefix is given, only assets whose name starts with that prefix are considered.
     """
-    url = f"{GITHUB_API}/repos/{repo}/releases/latest"
+    release_path = f"tags/{tag}" if tag else "latest"
+    url = f"{GITHUB_API}/repos/{repo}/releases/{release_path}"
     resp = session.get(url, timeout=15)
 
     if resp.status_code == 404:
-        print(f"  SKIP: No releases found for {repo}")
+        print(f"  SKIP: No release {tag or 'found'} for {repo}")
         return None
     if resp.status_code == 403:
         reset = resp.headers.get("X-RateLimit-Reset", "unknown")
@@ -71,6 +73,25 @@ def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: s
     asset = max(jar_assets, key=lambda a: a["size"])
     print(f"  Found: {asset['name']} (tag {tag})")
     return asset["name"], asset["browser_download_url"]
+
+
+def get_ci_build_jar(job_url: str) -> tuple[str, str]:
+    """
+    Returns (filename, download_url) for the main JAR of the last successful
+    Jenkins build of `job_url` (e.g. BentoBox on CodeMC). Skips sources/javadoc JARs.
+    """
+    build_url = f"{job_url.rstrip('/')}/lastSuccessfulBuild"
+    resp = requests.get(f"{build_url}/api/json", timeout=30,
+                        params={"tree": "number,url,artifacts[fileName,relativePath]"})
+    resp.raise_for_status()
+    build = resp.json()
+    jars = [a for a in build.get("artifacts", [])
+            if a["fileName"].endswith(".jar")
+            and not any(x in a["fileName"] for x in ("-sources", "-javadoc", "-slim"))]
+    if len(jars) != 1:
+        raise RuntimeError(f"expected one main JAR in {build_url}, found {[a['fileName'] for a in jars]}")
+    print(f"  Found: {jars[0]['fileName']} (CI build #{build['number']}, {build['url']})")
+    return jars[0]["fileName"], f"{build['url']}artifact/{jars[0]['relativePath']}"
 
 
 def artifact_name(filename: str) -> str:
@@ -133,6 +154,15 @@ def main():
             "Example: --bentobox-jar ~/git/bentobox/build/libs/BentoBox-3.11.2-SNAPSHOT.jar"
         ),
     )
+    parser.add_argument(
+        "--bentobox",
+        default="",
+        help=(
+            "Which BentoBox to test: blank for the latest GitHub release, 'ci' for the last "
+            "successful CI build (bentobox.ci_job in the config), a release tag such as 3.23.0, "
+            "or an https:// URL to a JAR. Ignored when --bentobox-jar is given."
+        ),
+    )
     args = parser.parse_args()
 
     # BentoBox JAR → plugins/
@@ -179,9 +209,22 @@ def main():
             print(f"  FAIL: --bentobox-jar path not found: {src}")
             failed.append("BentoBox")
     else:
-        print(f"  Fetching from GitHub releases ({config['bentobox']['repo']})...")
+        choice = args.bentobox.strip()
         try:
-            result = get_latest_release_jar(config["bentobox"]["repo"], session)
+            if choice.lower() == "ci":
+                print(f"  Fetching last successful CI build ({config['bentobox']['ci_job']})...")
+                result = get_ci_build_jar(config["bentobox"]["ci_job"])
+            elif choice.startswith(("https://", "http://")):
+                filename = choice.split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+                if not filename.endswith(".jar"):
+                    raise ValueError(f"URL does not point to a .jar: {choice}")
+                result = (filename, choice)
+            elif choice:
+                print(f"  Fetching release {choice} ({config['bentobox']['repo']})...")
+                result = get_latest_release_jar(config["bentobox"]["repo"], session, tag=choice)
+            else:
+                print(f"  Fetching latest release ({config['bentobox']['repo']})...")
+                result = get_latest_release_jar(config["bentobox"]["repo"], session)
             if result:
                 filename, url = result
                 download_jar("BentoBox", filename, url, plugins_dir, session)

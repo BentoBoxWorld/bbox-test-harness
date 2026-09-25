@@ -79,7 +79,10 @@ pip install -r scripts/requirements.txt
 export GITHUB_TOKEN=ghp_yourtoken
 python scripts/fetch_jars.py \
   --bentobox-jar ~/git/bentobox/build/libs/BentoBox-3.11.2-SNAPSHOT-LOCAL.jar
-#    Or omit --bentobox-jar to download the latest stable release instead.
+#    Or omit --bentobox-jar to download the latest stable release instead, or pick one:
+#      --bentobox ci        last successful CodeMC Jenkins build (unreleased fixes)
+#      --bentobox 3.23.0    a specific GitHub release
+#      --bentobox https://.../BentoBox-x.y.z.jar
 
 # 4. Start the server
 docker compose up -d
@@ -128,6 +131,15 @@ in the matrix skip it (recorded as a warning, not a failure) instead of failing:
 
 A game mode also needs its world added to `expected_worlds` and its admin command
 to `commands_to_check`, both in `scripts/run_tests.py`.
+
+## Choosing the BentoBox build in CI
+
+The nightly run tests the latest **published** BentoBox release. Draft releases
+don't count. To test something else, use **Actions → BentoBox Integration Tests →
+Run workflow** and fill in *BentoBox to test*: `ci` for the last successful
+CodeMC build, a release tag such as `3.23.0`, or a direct JAR URL. The *Branch*
+selector in that dialog picks which version of this harness runs, not which
+BentoBox is tested.
 
 ## Silencing a known-benign log line
 
