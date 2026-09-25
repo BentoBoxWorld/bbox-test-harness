@@ -712,6 +712,81 @@ def _strip_incompatible_addon_reports(lines: list[str], skip_addons: dict[str, s
     return kept
 
 
+_RELEVANT_RE = re.compile(r"(bentobox|addon)", re.IGNORECASE)
+_TAG_RE = re.compile(r"^\[BentoBox\](?:\s+\[([^\]]+)\])?")
+_ADDON_FRAME_RE = re.compile(r"at (\w+)-[\w.\-]+\.jar//world\.bentobox\.")
+_BANNER_START_RE = re.compile(r"\*{5,}\s+\S.*\*{5,}")   # "***** Disclaimer *****"
+_BANNER_END_RE = re.compile(r"^\*{5,}$")
+_VARYING_RE = re.compile(r"@[0-9a-f]{4,}|-?\d+(?:\.\d+)?")
+
+
+def group_log_events(lines: list[str], level_re: re.Pattern) -> list[tuple[str, str, int, int]]:
+    """Group log lines at a level into events, then events by source.
+
+    A raw line count misleads in both directions: one exception is dozens of
+    lines, and the lines that mention BentoBox are its stack frames, not the
+    exception itself. So first join lines into events: a message plus the stack
+    frames that follow it, or a whole BentoBox "***** Disclaimer *****" banner.
+    Keep events that mention BentoBox or an addon anywhere, then group them by
+    (source, message with numbers and object hashes blanked).
+
+    The source is the addon tag ("[BentoBox] [Level] ..." → Level), else the first
+    addon JAR in the stack trace, else BentoBox.
+
+    Returns (source, sample message, event count, line count), largest first.
+    """
+    events: list[list[str]] = []
+    in_banner = False
+    for raw in lines:
+        if not level_re.search(raw):
+            in_banner = False
+            continue
+        line = _clean_line(raw)
+        if in_banner or (events and _STACK_FRAME_RE.search(line)):
+            events[-1].append(line)
+        else:
+            events.append([line])
+        stripped = _TAG_RE.sub("", line).strip()
+        if _BANNER_START_RE.search(stripped):
+            in_banner = True
+        elif in_banner and _BANNER_END_RE.match(stripped):
+            in_banner = False
+
+    groups: dict[tuple[str, str], list] = {}
+    for event in events:
+        text = "\n".join(event)
+        if not _RELEVANT_RE.search(text) or "No metrics" in text or "bStats" in text:
+            continue
+        tag = _TAG_RE.match(event[0])
+        frame = _ADDON_FRAME_RE.findall(text)
+        addon_frames = [f for f in frame if f != "BentoBox"]
+        if tag:
+            source = tag.group(1) or "BentoBox"
+        else:
+            source = addon_frames[0] if addon_frames else "BentoBox"
+        message = _TAG_RE.sub("", event[0]).strip()
+        key = (source, _VARYING_RE.sub("#", message))
+        g = groups.setdefault(key, [source, message, 0, 0])
+        g[2] += 1
+        g[3] += len(event)
+    return sorted((tuple(g) for g in groups.values()), key=lambda g: -g[3])
+
+
+def format_log_groups(groups: list[tuple[str, str, int, int]], limit: int = 8) -> str:
+    """One line per group, e.g. 'AcidIsland ×18 (504 lines): ServerInternalException: ...'."""
+    out = []
+    for source, message, events, nlines in groups[:limit]:
+        # Shorten fully-qualified class names and drop object hashes so the useful
+        # part fits, e.g. "ServerInternalException: ... PotentSulfurBlockEntity at ..."
+        message = re.sub(r"\b(?:[a-z_][\w$]*\.)+([A-Z][\w$]*)(?:@[0-9a-f]+)?", r"\1", message)
+        if len(message) > 220:
+            message = message[:217] + "..."
+        out.append(f"{source} ×{events} ({nlines} line{'s' * (nlines != 1)}): {message}")
+    if len(groups) > limit:
+        out.append(f"... and {len(groups) - limit} more source(s)")
+    return "\n".join(out)
+
+
 def test_no_console_errors(log_text: str,
                           skip_addons: dict[str, str] | None = None,
                           whitelist: list[dict] | None = None) -> TestSuite:
@@ -769,13 +844,7 @@ def test_no_console_errors(log_text: str,
         if _ERROR_LEVEL_RE.search(line)
         and re.search(r"(bentobox|BentoBox|addon)", line, re.IGNORECASE)
     ]
-    bbox_warns = [
-        line for line in lines
-        if _WARN_LEVEL_RE.search(line)
-        and re.search(r"(bentobox|BentoBox|addon)", line, re.IGNORECASE)
-        and "No metrics" not in line
-        and "bStats" not in line
-    ]
+    warn_groups = group_log_events(lines, _WARN_LEVEL_RE)
 
     if whitelisted:
         total = sum(whitelisted.values())
@@ -789,10 +858,12 @@ def test_no_console_errors(log_text: str,
         len(bbox_errors) == 0,
         "\n".join(bbox_errors[:10]) if bbox_errors else ""
     )
+    warn_events = sum(g[2] for g in warn_groups)
     suite.add(
         "No unexpected BentoBox WARNs in log",
-        len(bbox_warns) == 0,
-        f"{len(bbox_warns)} warnings:\n" + "\n".join(bbox_warns[:5]) if bbox_warns else ""
+        warn_events == 0,
+        f"{warn_events} warning(s) from {len(warn_groups)} source(s):\n"
+        + format_log_groups(warn_groups) if warn_groups else ""
     )
 
     # Plugin load failures — catches both hard load errors and Pladdon/class issues
@@ -1027,7 +1098,7 @@ def main():
             icon = "⊘" if result.skipped else ("✓" if result.passed else "✗")
             print(f"    [{icon}] {result.name}")
             if (result.skipped or not result.passed) and result.message:
-                for line in result.message.splitlines()[:3]:
+                for line in result.message.splitlines()[:10]:
                     print(f"          {line}")
         total_pass += suite.passed
         total_fail += suite.failed
