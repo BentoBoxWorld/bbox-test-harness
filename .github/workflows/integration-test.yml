@@ -37,7 +37,7 @@ jobs:
   integration-test:
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false  # run all versions even if one fails
@@ -91,7 +91,7 @@ jobs:
             --log-file /tmp/bbox-server-${{ matrix.mc_version }}.log \
             --config addons.yml \
             --junit-output /tmp/junit-results-${{ matrix.mc_version }}.xml \
-            --timeout 600
+            --timeout 900
 
       - name: Collect server log
         if: always()

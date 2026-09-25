@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -72,6 +73,31 @@ def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: s
     return asset["name"], asset["browser_download_url"]
 
 
+def artifact_name(filename: str) -> str:
+    """
+    Strip the version from a JAR filename: 'BentoBox-3.23.0.jar' -> 'bentobox',
+    'BentoBox-3.11.2-SNAPSHOT.jar' -> 'bentobox', 'Vault.jar' -> 'vault'.
+    Lower-cased because some addons ship lower-case assets (cauldronwitchery-2.1.0.jar).
+    """
+    stem = filename[:-len(".jar")] if filename.endswith(".jar") else filename
+    return re.sub(r"-\d.*$", "", stem).lower()
+
+
+def remove_stale_jars(keep: str, directory: Path):
+    """
+    Delete other versions of the same artifact in `directory`. Without this, an
+    old BentoBox-3.22.2.jar left next to a fresh BentoBox-3.23.0.jar makes Paper
+    refuse to load BentoBox ("Ambiguous plugin name"), and duplicate addon JARs
+    make BentoBox reject the addon ("Duplicate addon!").
+    Called only after the new JAR is in place, so a failed download keeps the old one.
+    """
+    name = artifact_name(keep)
+    for jar in directory.glob("*.jar"):
+        if jar.name != keep and artifact_name(jar.name) == name:
+            jar.unlink()
+            print(f"  Removed stale {jar.name}")
+
+
 def download_jar(name: str, filename: str, url: str, output_dir: Path, session: requests.Session):
     dest = output_dir / filename
     print(f"  Downloading {filename}...")
@@ -84,6 +110,7 @@ def download_jar(name: str, filename: str, url: str, output_dir: Path, session: 
             f.write(chunk)
     size_kb = dest.stat().st_size // 1024
     print(f"  ✓ {filename} ({size_kb} KB)")
+    remove_stale_jars(filename, output_dir)
 
 
 def main():
@@ -147,6 +174,7 @@ def main():
             dest = plugins_dir / src.name
             shutil.copy2(src, dest)
             print(f"  ✓ Copied local JAR: {src.name}")
+            remove_stale_jars(src.name, plugins_dir)
         else:
             print(f"  FAIL: --bentobox-jar path not found: {src}")
             failed.append("BentoBox")

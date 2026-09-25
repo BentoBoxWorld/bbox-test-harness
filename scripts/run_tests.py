@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -45,7 +46,7 @@ RCON_HOST = "localhost"
 RCON_PORT = 25575
 RCON_PASSWORD = "bbox-test-harness"
 DOCKER_CONTAINER = "bbox-test-server"
-STARTUP_TIMEOUT = 600  # seconds total budget (startup + Done line) — 30 addons + world gen can be slow
+STARTUP_TIMEOUT = 900  # seconds total budget (startup + Done line) — 33 addons + world gen can be slow
 STARTUP_POLL = 5       # seconds between log-poll attempts
 CMD_MAX_WAIT = 25      # max seconds to wait for a single command's console output
 # `mc-send-to-console` refuses to run unless invoked as the server user (the itzg
@@ -449,12 +450,14 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str],
             )
             continue
 
+        # BentoBox 3.22+ pads the status parentheses ("AcidIsland 2.1.1 ( ENABLED )");
+        # older versions did not. Tolerate both.
         enabled_pattern = re.compile(
-            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(ENABLED\)",
+            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(\s*ENABLED\s*\)",
             re.IGNORECASE | re.MULTILINE
         )
         disabled_pattern = re.compile(
-            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(DISABLED\)",
+            rf"^\s*{re.escape(addon_name)}\s+\S+\s+\(\s*DISABLED\s*\)",
             re.IGNORECASE | re.MULTILINE
         )
 
@@ -545,6 +548,10 @@ def test_commands_registered(container: str,
         ("acid",      r"(usage|acid|acidisland|sub-command)",   "AcidIsland command",     "AcidIsland"),
         ("obadmin",   r"(usage|ob|oneblock|sub-command)",       "AOneBlock admin",        "AOneBlock"),
         ("cbadmin",   r"(usage|cb|caveblock|sub-command)",      "CaveBlock admin",        "CaveBlock"),
+        # No short alias in these two patterns: 'ch'/'tw' are short enough to match
+        # incidental text in an error response and turn a failure into a pass.
+        ("chadmin",   r"(usage|chunkblock|sub-command)",        "ChunkBlock admin",       "ChunkBlock"),
+        ("twadmin",   r"(usage|tradewinds|sub-command)",        "TradeWinds admin",       "TradeWinds"),
         ("boxadmin",  r"(usage|box|boxed|sub-command)",         "Boxed admin",            "Boxed"),
         ("sgadmin",   r"(usage|sg|skygrid|sub-command)",        "SkyGrid admin",          "SkyGrid"),
         ("padmin",    r"(usage|poseidon|sub-command)",          "Poseidon admin",         "Poseidon"),
@@ -578,8 +585,58 @@ def test_commands_registered(container: str,
     return suite
 
 
+# A stack-trace continuation line: "\tat foo.Bar(...)", "\t... 12 more", "Caused by: ...".
+_STACK_FRAME_RE = re.compile(r"^\s+(at\s|\.\.\.\s|Caused by:)|^Caused by:")
+# Paper stamps the level inside the timestamp bracket ("[01:49:40 ERROR]:"), so a
+# bare "\[ERROR\]" never matches; allow the optional timestamp prefix.
+_LOG_LEVEL_RE   = re.compile(r"\[(?:[\d:]+\s+)?(WARN|ERROR|SEVERE)\]")
+_ERROR_LEVEL_RE = re.compile(r"\[(?:[\d:]+\s+)?(ERROR|SEVERE)\]")
+_WARN_LEVEL_RE  = re.compile(r"\[(?:[\d:]+\s+)?WARN\]")
+
+
+def _strip_incompatible_addon_reports(lines: list[str], skip_addons: dict[str, str]) -> list[str]:
+    """Drop BentoBox's whole "incompatible addon" report for each skipped addon.
+
+    When an addon is too new for the server, BentoBox emits a fixed block:
+
+        [WARN]  [BentoBox] Skipping TradeWinds as it is incompatible ...
+        [WARN]  [BentoBox] Do you need to update your BentoBox?
+        [WARN]  [BentoBox] NOTE: DO NOT report this as a bug ...
+        [ERROR] [BentoBox] If you really think this is an error, report this stack trace ...
+        [ERROR] [BentoBox] java.lang.NoClassDefFoundError: net/kyori/adventure/dialog/DialogLike
+                at TradeWinds-0.2.0.jar//world.bentobox.tradewinds.TradeWinds.onEnable(...)
+                at BentoBox-3.22.2.jar//...AddonsManager.enableAddon(...)
+
+    Only the first line and the first stack frame name the addon, so per-line
+    name filtering leaves the exception header and the BentoBox-owned frames
+    behind. Suppression therefore starts at the "Skipping <addon>" marker and
+    runs until the first line that is neither a stack frame nor a WARN/ERROR —
+    i.e. the natural end of the report — so unrelated later errors still surface.
+    """
+    if not skip_addons:
+        return lines
+
+    start_re = re.compile(
+        r"Skipping\s+(" + "|".join(re.escape(n) for n in skip_addons) + r")\s+as it is incompatible",
+        re.IGNORECASE,
+    )
+    kept: list[str] = []
+    suppressing = False
+    for line in lines:
+        if start_re.search(line):
+            suppressing = True
+            continue
+        if suppressing:
+            if _STACK_FRAME_RE.search(line) or _LOG_LEVEL_RE.search(line):
+                continue
+            suppressing = False
+        kept.append(line)
+    return kept
+
+
 def test_no_console_errors(log_text: str,
-                          skip_addons: dict[str, str] | None = None) -> TestSuite:
+                          skip_addons: dict[str, str] | None = None,
+                          whitelist: list[dict] | None = None) -> TestSuite:
     """
     Parse the server log for WARN/ERROR/SEVERE entries related to BentoBox
     or any addon. This is the log-file equivalent of your current manual scan.
@@ -587,6 +644,11 @@ def test_no_console_errors(log_text: str,
     Lines mentioning an addon in `skip_addons` are ignored: that addon is known
     to be incompatible with this server's MC version, so any load warning/error
     it produces is expected, not a regression.
+
+    `whitelist` is the `log_whitelist` section of addons.yml — a list of
+    {pattern, reason} entries naming known-benign lines. Matches are dropped
+    before the checks below, but their count is reported so a whitelist that has
+    quietly grown to swallow everything is visible rather than invisible.
     """
     suite = TestSuite("Console Health")
     skip_addons = skip_addons or {}
@@ -598,6 +660,7 @@ def test_no_console_errors(log_text: str,
 
     lines = log_text.splitlines()
     if skip_addons:
+        lines = _strip_incompatible_addon_reports(lines, skip_addons)
         patterns = [re.escape(name) for name in skip_addons]
         # Paper's plugin loader rejects an incompatible addon's Pladdon with a
         # stack-trace line that names only the API version, not the addon, e.g.
@@ -608,19 +671,40 @@ def test_no_console_errors(log_text: str,
         skip_re = re.compile("|".join(patterns), re.IGNORECASE)
         lines = [l for l in lines if not skip_re.search(l)]
 
+    # Known-benign lines, declared with a reason in addons.yml's log_whitelist.
+    whitelisted: Counter = Counter()
+    if whitelist:
+        compiled = [(re.compile(e["pattern"]), e["pattern"]) for e in whitelist]
+        kept = []
+        for line in lines:
+            for rx, src in compiled:
+                if rx.search(line):
+                    whitelisted[src] += 1
+                    break
+            else:
+                kept.append(line)
+        lines = kept
+
     # ERROR/SEVERE lines mentioning BentoBox or addon packages
     bbox_errors = [
         line for line in lines
-        if re.search(r"\[(ERROR|SEVERE)\]", line)
+        if _ERROR_LEVEL_RE.search(line)
         and re.search(r"(bentobox|BentoBox|addon)", line, re.IGNORECASE)
     ]
     bbox_warns = [
         line for line in lines
-        if "[WARN]" in line
+        if _WARN_LEVEL_RE.search(line)
         and re.search(r"(bentobox|BentoBox|addon)", line, re.IGNORECASE)
         and "No metrics" not in line
         and "bStats" not in line
     ]
+
+    if whitelisted:
+        total = sum(whitelisted.values())
+        print(f"  Console Health: {total} whitelisted log line(s) ignored "
+              f"({len(whitelisted)} of {len(whitelist)} patterns matched):")
+        for pattern, count in whitelisted.most_common():
+            print(f"    {count:>4}x  {pattern}")
 
     suite.add(
         "No BentoBox ERROR/SEVERE in log",
@@ -725,6 +809,18 @@ def main():
         config = yaml.safe_load(f)
     addon_names = [a["name"] for a in config["addons"]]
 
+    # Known-benign log lines (see the log_whitelist section of addons.yml).
+    # Validate up front: a bad regex here would otherwise silently match nothing
+    # and the whitelist would look like it was working.
+    whitelist = config.get("log_whitelist") or []
+    for entry in whitelist:
+        if "pattern" not in entry or "reason" not in entry:
+            sys.exit(f"log_whitelist entry needs both 'pattern' and 'reason': {entry}")
+        try:
+            re.compile(entry["pattern"])
+        except re.error as exc:
+            sys.exit(f"log_whitelist pattern {entry['pattern']!r} is not a valid regex: {exc}")
+
     # Addons that can't run on this MC version (declared via `min_api` in addons.yml).
     # Their load/world/command checks become SKIPPED warnings instead of failures.
     skip_addons = find_incompatible_addons(config, args.mc_version)
@@ -741,11 +837,13 @@ def main():
         ("boxed_world",      "Boxed"),
         ("bskyblock_world",  "BSkyBlock"),
         ("caveblock-world",  "CaveBlock"),
+        ("chunkblock_world", "ChunkBlock"),
         ("oneblock_world",   "AOneBlock"),
         ("parkour_world",    "Parkour"),
         ("poseidon_world",   "Poseidon"),
         ("skygrid-world",    "SkyGrid"),
         ("stranger_world",   "StrangerRealms"),
+        ("tradewinds_world", "TradeWinds"),
     ]
 
     # Wait for server — two-phase: container up, then Paper "Done" line in log
@@ -822,7 +920,7 @@ def main():
     run_suite("Command Registration", test_commands_registered, args.container, skip_addons)
     run_suite("Addon Load", test_addon_enabled, bbox_v, addon_names, skip_addons)
     run_suite("World Registration", test_worlds_registered, bbox_v, expected_worlds, skip_addons)
-    run_suite("Console Health", test_no_console_errors, log_text, skip_addons)
+    run_suite("Console Health", test_no_console_errors, log_text, skip_addons, whitelist)
 
     # Print results
     print(f"\n{'='*60}")

@@ -45,7 +45,7 @@ bbox-test-harness/
 
 ### Getting a GitHub token
 
-All the addon repos are public, so the token needs **no special permissions at all** — it is used only to identify your requests and raise the API rate limit from 60 to 5,000 requests/hour, preventing the 403 errors you'll otherwise hit when querying ~32 repos in quick succession.
+All the addon repos are public, so the token needs **no special permissions at all** — it is used only to identify your requests and raise the API rate limit from 60 to 5,000 requests/hour, preventing the 403 errors you'll otherwise hit when querying ~34 repos in quick succession.
 
 1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**
    (or visit https://github.com/settings/personal-access-tokens/new directly)
@@ -106,7 +106,7 @@ The workflow at `.github/workflows/integration-test.yml` runs nightly and can al
 4. Publishes results as a JUnit report in the Actions UI
 5. Uploads the full server log as an artifact
 
-Add `GITHUB_TOKEN` as a repository secret. The token needs no special scopes (read-only public access is enough) — it's used purely to avoid GitHub's burst rate limit when querying 32 repos in sequence. In GitHub Actions, `secrets.GITHUB_TOKEN` is available automatically.
+Add `GITHUB_TOKEN` as a repository secret. The token needs no special scopes (read-only public access is enough) — it's used purely to avoid GitHub's burst rate limit when querying 34 repos in sequence. In GitHub Actions, `secrets.GITHUB_TOKEN` is available automatically.
 
 ## Adding a new addon
 
@@ -125,6 +125,29 @@ in the matrix skip it (recorded as a warning, not a failure) instead of failing:
   repo: BentoBoxWorld/CaveBlock
   min_api: "1.21.11"   # skipped on servers older than 1.21.11
 ```
+
+A game mode also needs its world added to `expected_worlds` and its admin command
+to `commands_to_check`, both in `scripts/run_tests.py`.
+
+## Silencing a known-benign log line
+
+`test_no_console_errors` fails on any BentoBox/addon `ERROR`, `SEVERE` or `WARN`.
+When a line is genuinely harmless, add a regex to `log_whitelist` in `addons.yml`
+**with the reason it is safe** — an unexplained whitelist decays into "ignore
+everything" and the check goes quietly blind:
+
+```yaml
+log_whitelist:
+  - pattern: "Unknown listing in blocks section:"
+    reason: >
+      Level's config targets current Minecraft, so older servers in the matrix
+      report materials that do not exist yet. Tracks server age, not a defect.
+```
+
+Every run prints how many lines each pattern swallowed, so a pattern that has
+grown too broad shows up in the CI output. Prefer fixing the addon over
+whitelisting; if you must whitelist a real bug to keep the matrix green, mark it
+`KNOWN BUG` and delete the entry when the upstream fix ships.
 
 ## Extending the tests
 

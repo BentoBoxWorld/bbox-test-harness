@@ -20,6 +20,8 @@ plugins/BentoBox/panels/
 # Other plugin runtime data
 plugins/bStats/
 plugins/spark/
+plugins/Essentials/
+plugins/Vault/
 
 # Keep tracked: BentoBox config (committed so the server has it on first boot)
 !plugins/BentoBox/config.yml
