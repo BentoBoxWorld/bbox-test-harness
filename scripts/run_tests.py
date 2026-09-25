@@ -376,6 +376,49 @@ def console_command(container: str, command: str, max_wait: float = CMD_MAX_WAIT
     return "\n".join(_clean_line(l) for l in lines[before:]).strip()
 
 
+def bbox_v_exception(bbox_v: str) -> str | None:
+    """Return the exception summary if 'bbox v' crashed part-way, else None.
+
+    When BentoBox's version command throws (e.g. an NPE from a game mode that
+    failed to enable and left a null world behind), Paper logs
+    "Command exception: /bbox v" followed by the exception line, and the output
+    stops before the world and addon lists. Every addon and world check would
+    then fail for the same reason, burying the one real failure.
+    """
+    lines = bbox_v.splitlines()
+    for i, line in enumerate(lines):
+        if "Command exception:" in line or "An unexpected error occurred" in line:
+            return "\n".join(lines[i:i + 2])
+    return None
+
+
+def addon_status_from_log(log_text: str, addon_names: list[str]) -> dict[str, tuple[bool, str]]:
+    """Derive each addon's enable status from BentoBox's startup log.
+
+    Used only when 'bbox v' crashed. AddonsManager logs "Enabling <Addon> (x.y.z)..."
+    before calling onEnable, and on failure one of the messages matched below —
+    so an addon counts as enabled if it started enabling and nothing reports it failed.
+    Returns name → (enabled, reason).
+    """
+    bbox_lines = [_clean_line(l) for l in log_text.splitlines() if "[BentoBox]" in l]
+    status = {}
+    for name in addon_names:
+        n = re.escape(name)
+        failure = re.compile(
+            rf"\[BentoBox\]\s+(Skipping {n}\b|{n} has dependency on|Cannot load {n} because"
+            rf"|{n} is disabled\.|Addon {n}:)"
+        )
+        failed = next((l for l in bbox_lines if failure.search(l)), None)
+        started = any(re.search(rf"\[BentoBox\]\s+Enabling {n} \(", l) for l in bbox_lines)
+        if failed:
+            status[name] = (False, f"{name} did not enable: {failed}")
+        elif not started:
+            status[name] = (False, f"No 'Enabling {name} (...)' line in the startup log")
+        else:
+            status[name] = (True, "")
+    return status
+
+
 # ─────────────────────────────────────────────────────────────
 # Test suites
 # ─────────────────────────────────────────────────────────────
@@ -402,6 +445,12 @@ def test_core_load(bbox_v: str) -> TestSuite:
         "Database:" in bbox_v,
         bbox_v[:300]
     )
+    exc = bbox_v_exception(bbox_v)
+    if exc:
+        # The missing addon list and the ERROR in the output are both just this
+        # exception — report it once instead of as three failures.
+        suite.add("'bbox v' completes without an exception", False, exc)
+        return suite
     suite.add(
         "Addon list present in output",
         "Loaded Addons:" in bbox_v,
@@ -416,7 +465,8 @@ def test_core_load(bbox_v: str) -> TestSuite:
 
 
 def test_addon_enabled(bbox_v: str, addon_names: list[str],
-                       skip_addons: dict[str, str] | None = None) -> TestSuite:
+                       skip_addons: dict[str, str] | None = None,
+                       log_status: dict[str, tuple[bool, str]] | None = None) -> TestSuite:
     """
     Check that each addon reports (ENABLED) in the 'bbox v' console output.
 
@@ -430,11 +480,15 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str],
     Addons in `skip_addons` (name → required min API) declare a higher minimum
     Minecraft API than this server provides, so they are expected not to load —
     they are recorded as SKIPPED (a warning), not a failure.
+
+    If 'bbox v' crashed before listing addons, `log_status` (from
+    addon_status_from_log) is used instead, so only the addons that really
+    failed are reported.
     """
     suite = TestSuite("Addon Load")
     skip_addons = skip_addons or {}
 
-    if not bbox_v:
+    if not bbox_v and log_status is None:
         suite.add("bbox v output available", False,
                   "No 'bbox v' response — cannot verify addon status")
         return suite
@@ -448,6 +502,12 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str],
                 f"newer than this server — incompatibility is expected, not a failure",
                 skipped=True,
             )
+            continue
+
+        if log_status is not None:
+            enabled, reason = log_status[addon_name]
+            suite.add(f"{addon_name} is ENABLED", enabled,
+                      f"{reason} (from startup log; 'bbox v' crashed)" if reason else "")
             continue
 
         # BentoBox 3.22+ pads the status parentheses ("AcidIsland 2.1.1 ( ENABLED )");
@@ -479,7 +539,9 @@ def test_addon_enabled(bbox_v: str, addon_names: list[str],
 
 
 def test_worlds_registered(bbox_v: str, expected_worlds: list[tuple[str, str]],
-                          skip_addons: dict[str, str] | None = None) -> TestSuite:
+                          skip_addons: dict[str, str] | None = None,
+                          log_status: dict[str, tuple[bool, str]] | None = None,
+                          log_text: str = "") -> TestSuite:
     """
     Check that each expected game world appears in the 'bbox v' console output.
 
@@ -490,11 +552,15 @@ def test_worlds_registered(bbox_v: str, expected_worlds: list[tuple[str, str]],
     `expected_worlds` is a list of (world_name, owning_addon) pairs. A world whose
     owning addon is in `skip_addons` (incompatible with this server's MC version)
     is recorded as SKIPPED rather than a failure.
+
+    If 'bbox v' crashed before listing worlds, a world counts as registered when
+    its owning addon enabled (per `log_status`) and the world was created
+    (its name appears in `log_text`).
     """
     suite = TestSuite("World Registration")
     skip_addons = skip_addons or {}
 
-    if not bbox_v:
+    if not bbox_v and log_status is None:
         suite.add("bbox v output available", False,
                   "No 'bbox v' response — cannot verify world registration")
         return suite
@@ -514,6 +580,18 @@ def test_worlds_registered(bbox_v: str, expected_worlds: list[tuple[str, str]],
             rf"\b{re.escape(world_name)}\b",
             re.IGNORECASE
         )
+        if log_status is not None:
+            enabled, reason = log_status[owner]
+            if not enabled:
+                ok, msg = False, reason
+            elif not pattern.search(log_text):
+                ok, msg = False, f"'{world_name}' never appears in the startup log"
+            else:
+                ok, msg = True, ""
+            suite.add(f"World '{world_name}' registered", ok,
+                      f"{msg} (from startup log; 'bbox v' crashed)" if msg else "")
+            continue
+
         found = bool(pattern.search(bbox_v))
         suite.add(
             f"World '{world_name}' registered",
@@ -909,6 +987,16 @@ def main():
     bbox_v = console_command(args.container, "bbox v")
     print(f"  Got {len(bbox_v)} chars")
 
+    # If 'bbox v' crashed before listing addons and worlds, check them from the
+    # startup log instead, so one broken addon doesn't fail every check.
+    log_status = None
+    exc = bbox_v_exception(bbox_v)
+    if exc:
+        print(f"  WARNING: 'bbox v' threw an exception; addon and world checks will use the startup log:")
+        for line in exc.splitlines():
+            print(f"    {line}")
+        log_status = addon_status_from_log(log_text, addon_names)
+
     def run_suite(label: str, fn, *fn_args) -> None:
         print(f"--- Suite: {label} ---")
         start = time.monotonic()
@@ -918,8 +1006,9 @@ def main():
 
     run_suite("Core Load", test_core_load, bbox_v)
     run_suite("Command Registration", test_commands_registered, args.container, skip_addons)
-    run_suite("Addon Load", test_addon_enabled, bbox_v, addon_names, skip_addons)
-    run_suite("World Registration", test_worlds_registered, bbox_v, expected_worlds, skip_addons)
+    run_suite("Addon Load", test_addon_enabled, bbox_v, addon_names, skip_addons, log_status)
+    run_suite("World Registration", test_worlds_registered, bbox_v, expected_worlds, skip_addons,
+              log_status, log_text)
     run_suite("Console Health", test_no_console_errors, log_text, skip_addons, whitelist)
 
     # Print results
