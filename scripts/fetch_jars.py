@@ -30,6 +30,42 @@ SCRIPT_DIR = Path(__file__).parent
 DELAY_WITH_TOKEN = 0.2     # seconds
 DELAY_WITHOUT_TOKEN = 1.5  # seconds
 
+# Transient failures are retried with exponential backoff. The nightly run on
+# 2026-11-08 lost all 32 addon downloads to HTTP 504 during a half-hour GitHub
+# degradation; a few retries spread over about a minute ride out that kind of blip.
+MAX_ATTEMPTS = 4
+BACKOFF_BASE = 3.0        # seconds: 3, 6, 12 between attempts
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+
+
+def get_with_retry(session: requests.Session, url: str, **kwargs) -> requests.Response:
+    """
+    GET `url` through `session`, retrying on 5xx/429 responses and on connection
+    errors or timeouts. Any other response (including 403/404) is returned as-is
+    for the caller to interpret. The last failing response or exception is raised
+    once the attempts are exhausted.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            resp = session.get(url, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            reason = type(e).__name__
+        else:
+            if resp.status_code not in RETRY_STATUSES:
+                return resp
+            last_exc = requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+            reason = f"HTTP {resp.status_code}"
+            resp.close()
+        if attempt == MAX_ATTEMPTS:
+            break
+        wait = BACKOFF_BASE * 2 ** (attempt - 1)
+        print(f"  {reason}, retrying in {wait:.0f}s ({attempt}/{MAX_ATTEMPTS - 1})...")
+        time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
+
 
 def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: str | None = None,
                            tag: str | None = None) -> tuple[str, str] | None:
@@ -41,7 +77,7 @@ def get_latest_release_jar(repo: str, session: requests.Session, asset_prefix: s
     """
     release_path = f"tags/{tag}" if tag else "latest"
     url = f"{GITHUB_API}/repos/{repo}/releases/{release_path}"
-    resp = session.get(url, timeout=15)
+    resp = get_with_retry(session, url, timeout=15)
 
     if resp.status_code == 404:
         print(f"  SKIP: No release {tag or 'found'} for {repo}")
@@ -81,8 +117,8 @@ def get_ci_build_jar(job_url: str) -> tuple[str, str]:
     Jenkins build of `job_url` (e.g. BentoBox on CodeMC). Skips sources/javadoc JARs.
     """
     build_url = f"{job_url.rstrip('/')}/lastSuccessfulBuild"
-    resp = requests.get(f"{build_url}/api/json", timeout=30,
-                        params={"tree": "number,url,artifacts[fileName,relativePath]"})
+    resp = get_with_retry(requests.Session(), f"{build_url}/api/json", timeout=30,
+                          params={"tree": "number,url,artifacts[fileName,relativePath]"})
     resp.raise_for_status()
     build = resp.json()
     jars = [a for a in build.get("artifacts", [])
@@ -122,13 +158,22 @@ def remove_stale_jars(keep: str, directory: Path):
 def download_jar(name: str, filename: str, url: str, output_dir: Path, session: requests.Session):
     dest = output_dir / filename
     print(f"  Downloading {filename}...")
-    # browser_download_url is a plain HTTPS redirect — use a bare session without
-    # the GitHub API Accept header so the CDN serves the file directly.
-    resp = requests.get(url, timeout=60, stream=True)
+    # browser_download_url redirects to the asset CDN. Override the GitHub API
+    # Accept header so the CDN serves the file directly, but keep the session so
+    # the token still counts the github.com hop as authenticated (requests drops
+    # the Authorization header itself on the cross-host redirect).
+    resp = get_with_retry(session, url, timeout=60, stream=True, headers={"Accept": "*/*"})
     resp.raise_for_status()
-    with open(dest, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
+    # Stream to a temp file and rename, so a connection dropped mid-download
+    # never leaves a truncated .jar for Paper to choke on.
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        tmp.replace(dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     size_kb = dest.stat().st_size // 1024
     print(f"  ✓ {filename} ({size_kb} KB)")
     remove_stale_jars(filename, output_dir)
